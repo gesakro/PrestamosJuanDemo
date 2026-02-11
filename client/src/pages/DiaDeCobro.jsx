@@ -46,7 +46,7 @@ const OrdenInput = ({ valorInicial, onGuardar }) => {
 
 const DiaDeCobro = () => {
   const navigate = useNavigate();
-  const { clientes, obtenerCliente, obtenerCredito, actualizarCliente, agregarNota, toggleReportado } = useApp();
+  const { clientes, obtenerCliente, obtenerCredito, actualizarCliente, agregarNota, toggleReportado, fetchData } = useApp();
   const { user } = useAuth();
   const hoy = startOfDay(new Date());
 
@@ -91,6 +91,10 @@ const DiaDeCobro = () => {
   // Estructura: { [fechaStr]: Set([clienteId, clienteId, ...]) }
   const [clientesNoEncontradosPorFecha, setClientesNoEncontradosPorFecha] = useState({});
 
+  // Estados para progreso de prórroga global
+  const [procesandoProrrogaGlobal, setProcesandoProrrogaGlobal] = useState(false);
+  const [progresoProrroga, setProgresoProrroga] = useState({ actual: 0, total: 0 });
+
   // Cargar visitas y orden de cobro desde localStorage
   useEffect(() => {
     const cargarVisitas = () => {
@@ -129,71 +133,39 @@ const DiaDeCobro = () => {
     return () => window.removeEventListener('storage', cargarClientesNoEncontrados);
   }, []);
 
-  // Cargar orden de cobro desde el servidor al cambiar la fecha
-  useEffect(() => {
-    const cargarOrden = async () => {
-      try {
-        const response = await ordenCobroService.obtenerPorFecha(fechaSeleccionadaStr);
-        if (response.success) {
-          setOrdenCobro(prev => ({
-            ...prev,
-            [fechaSeleccionadaStr]: response.data
-          }));
-        }
-      } catch (error) {
-        console.error('Error al cargar órdenes de cobro desde el servidor:', error);
-        // Fallback: intentar cargar de localStorage por si acaso hay datos antiguos
-        const savedOrden = localStorage.getItem('ordenCobro');
-        if (savedOrden) {
-          try {
-            const parsed = JSON.parse(savedOrden);
-            if (parsed[fechaSeleccionadaStr]) {
-              setOrdenCobro(prev => ({
-                ...prev,
-                [fechaSeleccionadaStr]: parsed[fechaSeleccionadaStr]
-              }));
-            }
-          } catch (e) { }
+  const cargarProrrogas = async () => {
+    try {
+      const response = await prorrogaService.obtenerTodas();
+      if (response.success && Array.isArray(response.data)) {
+        const mapaProrrogas = {};
+        response.data.forEach(p => {
+          if (p.fechaProrroga) {
+            const key = `${p.clienteId}-${p.creditoId}-${p.nroCuota}`;
+            // Convertir fecha ISO a YYYY-MM-DD
+            const fechaStr = new Date(p.fechaProrroga).toISOString().split('T')[0];
+            mapaProrrogas[key] = fechaStr;
+          }
+        });
+        setProrrogasCuotas(mapaProrrogas);
+      }
+    } catch (error) {
+      console.error('Error al cargar prórrogas desde el servidor:', error);
+      toast.error('No se pudieron sincronizar las extensiones de fecha con el servidor');
+
+      // Fallback: intentar cargar de localStorage si falla el servidor
+      const savedProrrogas = localStorage.getItem('prorrogasCuotas');
+      if (savedProrrogas) {
+        try {
+          setProrrogasCuotas(JSON.parse(savedProrrogas));
+        } catch (e) {
+          console.error('Error fallback localStorage:', e);
         }
       }
-    };
-
-    cargarOrden();
-  }, [fechaSeleccionadaStr]);
+    }
+  };
 
   // Cargar prórrogas desde el BACKEND al iniciar
   useEffect(() => {
-    const cargarProrrogas = async () => {
-      try {
-        const response = await prorrogaService.obtenerTodas();
-        if (response.success && Array.isArray(response.data)) {
-          const mapaProrrogas = {};
-          response.data.forEach(p => {
-            if (p.fechaProrroga) {
-              const key = `${p.clienteId}-${p.creditoId}-${p.nroCuota}`;
-              // Convertir fecha ISO a YYYY-MM-DD
-              const fechaStr = new Date(p.fechaProrroga).toISOString().split('T')[0];
-              mapaProrrogas[key] = fechaStr;
-            }
-          });
-          setProrrogasCuotas(mapaProrrogas);
-        }
-      } catch (error) {
-        console.error('Error al cargar prórrogas desde el servidor:', error);
-        toast.error('No se pudieron sincronizar las extensiones de fecha con el servidor');
-
-        // Fallback: intentar cargar de localStorage si falla el servidor
-        const savedProrrogas = localStorage.getItem('prorrogasCuotas');
-        if (savedProrrogas) {
-          try {
-            setProrrogasCuotas(JSON.parse(savedProrrogas));
-          } catch (e) {
-            console.error('Error fallback localStorage:', e);
-          }
-        }
-      }
-    };
-
     cargarProrrogas();
   }, []);
 
@@ -1170,7 +1142,7 @@ const DiaDeCobro = () => {
   const [creditoSeleccionado, setCreditoSeleccionado] = useState(null);
   const [clienteSeleccionado, setClienteSeleccionado] = useState(null);
 
-  const aplicarProrrogaCuotasDelDia = async (clienteId, creditoId, nuevaFechaStr, nroCuotasTarget = null) => {
+  const aplicarProrrogaCuotasDelDia = async (clienteId, creditoId, nuevaFechaStr, nroCuotasTarget = null, silencioso = false) => {
     const cliente = clientes.find(c => c.id === clienteId);
     if (!cliente) return;
     const credito = (cliente.creditos || []).find(c => c.id === creditoId);
@@ -1245,13 +1217,19 @@ const DiaDeCobro = () => {
           });
         }
 
-        toast.success('Prórroga aplicada y guardada correctamente');
+        if (!silencioso) {
+          toast.success('Prórroga aplicada y guardada correctamente');
+        }
       } else {
-        toast.error('Error al guardar la prórroga en el servidor');
+        if (!silencioso) {
+          toast.error('Error al guardar la prórroga en el servidor');
+        }
       }
     } catch (error) {
       console.error('Error al guardar prórroga:', error);
-      toast.error('Error de conexión al guardar la prórroga');
+      if (!silencioso) {
+        toast.error('Error de conexión al guardar la prórroga');
+      }
     }
   };
 
@@ -1291,6 +1269,8 @@ const DiaDeCobro = () => {
     if (!datosProrrogaPendiente) return;
 
     if (esProrrogaGlobal) {
+      // Para la global, cerramos el modal primero para mostrar la pantalla de carga
+      setModalProrrogaOpen(false);
       await handleConfirmarProrrogaGlobal(motivo, nuevaFecha);
     } else {
       const { clienteId, creditoId, nroCuotas } = datosProrrogaPendiente;
@@ -1308,12 +1288,13 @@ const DiaDeCobro = () => {
           toast.warning('La prórroga se aplicó pero hubo un error al guardar la nota');
         }
       }
+
+      setModalProrrogaOpen(false);
     }
 
-    // 3. Limpiar estado y cerrar modal
+    // 3. Limpiar estado
     setEsProrrogaGlobal(false);
     setDatosProrrogaPendiente(null);
-    setModalProrrogaOpen(false);
   };
 
   const handleConfirmarProrrogaGlobal = async (motivo, nuevaFecha) => {
@@ -1321,14 +1302,15 @@ const DiaDeCobro = () => {
     const total = clientes.length;
     let exitosos = 0;
 
-    toast.info(`Iniciando prórroga global para ${total} clientes...`, { autoClose: 2000 });
+    // Iniciar pantalla de carga
+    setProcesandoProrrogaGlobal(true);
+    setProgresoProrroga({ actual: 0, total });
 
     // Procesar cada cliente
     for (const item of clientes) {
       try {
-        // 1. Aplicar prórroga
-        // Usamos la misma lógica que la individual pero masiva
-        await aplicarProrrogaCuotasDelDia(item.clienteId, item.creditoId, nuevaFecha, item.nroCuotasPendientes);
+        // 1. Aplicar prórroga modo silencioso
+        await aplicarProrrogaCuotasDelDia(item.clienteId, item.creditoId, nuevaFecha, item.nroCuotasPendientes, true);
 
         // 2. Agregar nota
         if (agregarNota) {
@@ -1337,10 +1319,18 @@ const DiaDeCobro = () => {
         }
 
         exitosos++;
+        setProgresoProrroga(prev => ({ ...prev, actual: exitosos }));
       } catch (error) {
         console.error(`Error prorrogando cliente ${item.clienteNombre}:`, error);
       }
     }
+
+    // Finalizar proceso
+    setProcesandoProrrogaGlobal(false);
+
+    // Refrescar todos los datos para que la vista se actualice correctamente
+    await fetchData();
+    await cargarProrrogas();
 
     toast.success(`Prórroga global completada: ${exitosos} de ${total} clientes movidos a ${nuevaFecha}`);
   };
@@ -2279,7 +2269,6 @@ const DiaDeCobro = () => {
         />
       )}
 
-      {/* Modal para Motivo de Prórroga */}
       <MotivoProrrogaModal
         isOpen={modalProrrogaOpen}
         initialDate={fechaSeleccionadaStr}
@@ -2289,6 +2278,46 @@ const DiaDeCobro = () => {
         }}
         onConfirm={handleConfirmarProrroga}
       />
+
+      {/* Pantalla de Carga para Prórroga Global */}
+      {procesandoProrrogaGlobal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-md transition-all">
+          <div className="bg-white rounded-3xl shadow-2xl p-8 max-w-sm w-full mx-4 text-center transform scale-100 transition-transform">
+            <div className="mb-8 relative flex justify-center">
+              {/* Spinner animado premium */}
+              <div className="w-28 h-28 border-[6px] border-slate-100 border-t-blue-600 rounded-full animate-spin"></div>
+              <div className="absolute inset-0 flex flex-col items-center justify-center">
+                <span className="text-2xl font-black text-slate-800">
+                  {Math.round((progresoProrroga.actual / (progresoProrroga.total || 1)) * 100)}%
+                </span>
+                <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Completado</span>
+              </div>
+            </div>
+
+            <h3 className="text-2xl font-extrabold text-slate-800 mb-2">Prorrogando Clientes</h3>
+            <p className="text-slate-500 font-medium mb-6">
+              Procesando: <span className="text-blue-600 font-bold">{progresoProrroga.actual}</span> de <span className="text-slate-700 font-bold">{progresoProrroga.total}</span>
+            </p>
+
+            {/* Barra de progreso */}
+            <div className="w-full bg-slate-100 rounded-full h-4 mb-4 overflow-hidden border border-slate-50">
+              <div
+                className="bg-gradient-to-r from-blue-500 to-blue-600 h-full transition-all duration-300 ease-out shadow-inner"
+                style={{ width: `${(progresoProrroga.actual / (progresoProrroga.total || 1)) * 100}%` }}
+              ></div>
+            </div>
+
+            <div className="flex items-center justify-center gap-2 text-slate-400">
+              <div className="flex space-x-1">
+                <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0s' }}></div>
+                <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+              </div>
+              <p className="text-xs font-semibold uppercase tracking-tighter">Sincronizando con el servidor...</p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

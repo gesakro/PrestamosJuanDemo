@@ -5,7 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import { Calendar, Users, ChevronLeft, ChevronRight, CheckCircle, Clock, MapPin, ChevronDown, ChevronUp, Phone, Search } from 'lucide-react';
 import { toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
-import { format, parseISO, startOfDay, addDays, subDays, isBefore } from 'date-fns';
+import { format, parseISO, startOfDay, addDays, subDays, isBefore, differenceInCalendarDays } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { formatearMoneda, calcularTotalMultasCuota, aplicarAbonosAutomaticamente, determinarEstadoCredito, formatearFechaCorta } from '../utils/creditCalculations';
 import CreditoDetalle from '../components/Creditos/CreditoDetalle';
@@ -49,6 +49,10 @@ const Rutas = () => {
   const [modalProrrogaOpen, setModalProrrogaOpen] = useState(false);
   const [datosProrrogaPendiente, setDatosProrrogaPendiente] = useState(null);
 
+  // Estado para clientes marcados como no encontrados por fecha
+  // Estructura: { [fechaStr]: Set([clienteId, clienteId, ...]) }
+  const [clientesNoEncontradosPorFecha, setClientesNoEncontradosPorFecha] = useState({});
+
   // Cargar visitas y orden de cobro desde localStorage
   useEffect(() => {
     const cargarVisitas = () => {
@@ -61,6 +65,30 @@ const Rutas = () => {
     cargarVisitas();
     window.addEventListener('storage', cargarVisitas);
     return () => window.removeEventListener('storage', cargarVisitas);
+  }, []);
+
+  // Cargar clientes no encontrados desde localStorage
+  useEffect(() => {
+    const cargarClientesNoEncontrados = () => {
+      const savedClientesNoEncontrados = localStorage.getItem('clientesNoEncontradosPorFecha');
+      if (savedClientesNoEncontrados) {
+        try {
+          const parsed = JSON.parse(savedClientesNoEncontrados);
+          // Convertir arrays de vuelta a Sets
+          const conSets = {};
+          Object.keys(parsed).forEach(fecha => {
+            conSets[fecha] = new Set(parsed[fecha]);
+          });
+          setClientesNoEncontradosPorFecha(conSets);
+        } catch (error) {
+          console.error('Error cargando clientes no encontrados:', error);
+        }
+      }
+    };
+
+    cargarClientesNoEncontrados();
+    window.addEventListener('storage', cargarClientesNoEncontrados);
+    return () => window.removeEventListener('storage', cargarClientesNoEncontrados);
   }, []);
 
   // Cargar orden de cobro desde el servidor al cambiar la fecha
@@ -201,6 +229,7 @@ const Rutas = () => {
     };
 
     const clientesUnicos = new Set();
+    const clientesUnicosHoy = new Set();
 
     // Helper para agregar item a barrio
     const agregarItem = (barrioRaw, item) => {
@@ -269,11 +298,25 @@ const Rutas = () => {
           const multasPendientes = totalMultas - multasCubiertas;
           const tieneSaldo = valorCuotaPendiente > 0 || multasPendientes > 0;
 
-          // Check fecha - comparar strings normalizados
-          if (fechaReferencia === fechaSeleccionadaStr) return tieneSaldo;
+          // Lógica Dinámica: Mostrar si:
+          // 1. Es exactamente la fecha que estamos viendo (fechaProgramada === fechaSeleccionada)
+          // 2. Es una fecha pasada (vencida) Y estamos viendo "Hoy" o "Mañana" en tiempo real
 
-          // Para fechas vencidas, comparar strings directamente (más seguro que Date)
-          return tieneSaldo && fechaReferencia <= fechaSeleccionadaStr;
+          const esDiaProgramado = fechaReferencia === fechaSeleccionadaStr;
+
+          const fechaReferenciaObj = parseISO(fechaReferencia);
+          const esVencidaOActual = isBefore(fechaReferenciaObj, hoy) || format(fechaReferenciaObj, 'yyyy-MM-dd') === format(hoy, 'yyyy-MM-dd');
+
+          const diffRespectoHoy = differenceInCalendarDays(
+            parseISO(fechaSeleccionadaStr),
+            hoy
+          );
+
+          const viendoHoyOMañana = diffRespectoHoy === 0 || diffRespectoHoy === 1;
+
+          if (esDiaProgramado || (esVencidaOActual && viendoHoyOMañana)) {
+            return tieneSaldo;
+          }
         });
 
         if (cuotasPendientesHoy.length > 0) {
@@ -386,12 +429,20 @@ const Rutas = () => {
           saldoTotalCredito: saldoTotalCredito,
           estadoCredito: estadoCredito,
           cuotasVencidasCount,
-          primerCuotaVencidaFecha
+          primerCuotaVencidaFecha,
+          nroCuotasPendientes: cuotasActualizadas.filter(c => !c.pagado).map(c => c.nroCuota),
+          reportado: cliente.reportado !== false
         };
 
         agregarItem(cliente.barrio, item);
 
-        // Stats
+        // Identificar si tiene cuota programada exactamente para hoy
+        // 1. Clientes: Contar solo si está reportado (Sí)
+        if (cliente.reportado !== false) {
+          clientesUnicosHoy.add(cliente.id);
+        }
+
+        // 2. Dinero (Por Cobrar / Recogido): Siempre sumar de todos, sin restricciones
         stats.esperado += totalACobrarHoy + totalCobradoHoy + totalAbonadoHoy;
         stats.pendiente += totalACobrarHoy;
         stats.recogido += (totalCobradoHoy + totalAbonadoHoy);
@@ -399,7 +450,16 @@ const Rutas = () => {
       });
     });
 
-    stats.clientesTotal = clientesUnicos.size;
+    // Agregar clientes no encontrados para esta fecha al conteo total
+    const clientesNoEncontradosHoy = clientesNoEncontradosPorFecha[fechaSeleccionadaStr] || new Set();
+    const clientesNoEncontradosArray = Array.from(clientesNoEncontradosHoy);
+
+    // Agregar cada cliente no encontrado al conjunto de clientes únicos
+    clientesNoEncontradosArray.forEach(clienteId => {
+      clientesUnicosHoy.add(clienteId);
+    });
+
+    stats.clientesTotal = clientesUnicosHoy.size;
 
     const barriosOrdenados = Object.keys(porBarrio).sort().reduce((obj, key) => {
       obj[key] = porBarrio[key];
@@ -407,7 +467,7 @@ const Rutas = () => {
     }, {});
 
     return { porBarrio: barriosOrdenados, stats };
-  }, [clientes, fechaSeleccionadaStr, creditosInvalidos, prorrogasCuotas]);
+  }, [clientes, fechaSeleccionadaStr, creditosInvalidos, prorrogasCuotas, clientesNoEncontradosPorFecha, hoy]);
 
   // Construir lista plana de cobros del día (sin agrupar por barrio)
   const listaCobrosDia = useMemo(() => {
@@ -416,10 +476,18 @@ const Rutas = () => {
       arr.forEach(item => items.push(item));
     });
 
+    // Filtrar para que solo aparezcan los reportados, igual que en la vista principal de DiaDeCobro
+    const itemsReportados = items.filter(item => item.reportado !== false);
+
+    // Si estuviéramos hoy o mañana, DiaDeCobro muestra también una sección de no reportados, 
+    // pero Rutas suele enfocarse en la ruta activa. 
+    // Por el comentario del usuario "deberían ser 2", esto confirma que debemos filtrar igual.
+    const itemsAMostrar = itemsReportados;
+
     const ordenFecha = ordenCobro[fechaSeleccionadaStr] || {};
 
     // Ordenar primero por número de orden asignado, luego por nombre de cliente
-    items.sort((a, b) => {
+    itemsAMostrar.sort((a, b) => {
       const rawA = ordenFecha[a.clienteId];
       const rawB = ordenFecha[b.clienteId];
 
@@ -456,7 +524,7 @@ const Rutas = () => {
       });
     }
 
-    return items;
+    return itemsAMostrar;
   }, [datosCobro, ordenCobro, fechaSeleccionadaStr, searchTerm]);
 
   // Obtener clientes que pagaron ese día, separados por cartera
