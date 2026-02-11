@@ -476,18 +476,64 @@ const Rutas = () => {
       arr.forEach(item => items.push(item));
     });
 
-    // Filtrar para que solo aparezcan los reportados, igual que en la vista principal de DiaDeCobro
-    const itemsReportados = items.filter(item => item.reportado !== false);
+    // Agregar clientes marcados como no encontrados para esta fecha (evitando duplicados si ya tienen cuota hoy)
+    const clientesNoEncontradosHoy = clientesNoEncontradosPorFecha[fechaSeleccionadaStr] || new Set();
+    const idsYaEnLista = new Set(items.map(i => i.clienteId));
 
-    // Si estuviéramos hoy o mañana, DiaDeCobro muestra también una sección de no reportados, 
-    // pero Rutas suele enfocarse en la ruta activa. 
-    // Por el comentario del usuario "deberían ser 2", esto confirma que debemos filtrar igual.
-    const itemsAMostrar = itemsReportados;
+    const clientesNoEncontradosItems = clientes
+      .filter(cliente =>
+        clientesNoEncontradosHoy.has(cliente.id) &&
+        !idsYaEnLista.has(cliente.id) &&
+        !cliente.tieneBotonRenovacion // Excluir renovaciones igual que en DiaDeCobro
+      )
+      .map(cliente => {
+        // Buscar si el cliente tiene créditos activos para mostrar información básica
+        const creditoActivo = cliente.creditos?.find(cred => !cred.renovado && cred.cuotas?.some(c => !c.pagado));
+        if (!creditoActivo) return null;
+
+        const { cuotasActualizadas } = aplicarAbonosAutomaticamente(creditoActivo);
+        const estadoCredito = determinarEstadoCredito(creditoActivo.cuotas, creditoActivo);
+
+        // Calcular saldo total
+        const saldoTotalCredito = cuotasActualizadas.reduce((sum, c) => {
+          if (c.pagado) return sum;
+          const abono = c.abonoAplicado || 0;
+          const multas = calcularTotalMultasCuota(c) - (c.multasCubiertas || 0);
+          return sum + (creditoActivo.valorCuota - abono) + multas;
+        }, 0);
+
+        return {
+          tipo: 'no_encontrado',
+          clienteId: cliente.id,
+          clienteNombre: cliente.nombre,
+          clienteDocumento: cliente.documento,
+          clienteTelefono: cliente.telefono,
+          clienteDireccion: cliente.direccion,
+          clienteBarrio: cliente.barrio,
+          clienteCartera: cliente.cartera || 'K1',
+          clientePosicion: cliente.posicion,
+          creditoId: creditoActivo.id,
+          creditoMonto: creditoActivo.monto,
+          creditoTipo: creditoActivo.tipo,
+          valorMostrar: 0,
+          valorRealACobrar: 0,
+          saldoTotalCredito: saldoTotalCredito,
+          estadoCredito: estadoCredito,
+          cuotasVencidasCount: 0,
+          primerCuotaVencidaFecha: null,
+          nroCuotasPendientes: [],
+          reportado: false
+        };
+      })
+      .filter(item => item !== null);
+
+    // Combinar todos los items (reportados y no reportados)
+    const todosLosItems = [...items, ...clientesNoEncontradosItems];
 
     const ordenFecha = ordenCobro[fechaSeleccionadaStr] || {};
 
     // Ordenar primero por número de orden asignado, luego por nombre de cliente
-    itemsAMostrar.sort((a, b) => {
+    const itemsOrdenados = [...todosLosItems].sort((a, b) => {
       const rawA = ordenFecha[a.clienteId];
       const rawB = ordenFecha[b.clienteId];
 
@@ -503,7 +549,7 @@ const Rutas = () => {
     // Filtrar por término de búsqueda si existe
     if (searchTerm.trim()) {
       const termino = searchTerm.toLowerCase().trim();
-      return items.filter(item => {
+      return itemsOrdenados.filter(item => {
         // Buscar en ref. crédito (posición del cliente)
         const refCredito = item.clientePosicion ? `#${item.clientePosicion}` : '';
         if (refCredito.toLowerCase().includes(termino)) return true;
@@ -524,8 +570,8 @@ const Rutas = () => {
       });
     }
 
-    return itemsAMostrar;
-  }, [datosCobro, ordenCobro, fechaSeleccionadaStr, searchTerm]);
+    return itemsOrdenados;
+  }, [datosCobro, ordenCobro, fechaSeleccionadaStr, searchTerm, clientes, clientesNoEncontradosPorFecha]);
 
   // Obtener clientes que pagaron ese día, separados por cartera
   const clientesPagados = useMemo(() => {
@@ -1004,11 +1050,16 @@ const Rutas = () => {
               rawOrden === undefined || rawOrden === null ? '' : String(rawOrden);
 
             // Determinar clase de color según la cartera del cliente
-            const carteraRowClass = item.clienteCartera === 'K2'
+            let carteraRowClass = item.clienteCartera === 'K2'
               ? 'bg-green-100 hover:bg-green-200 border-b'
               : item.clienteCartera === 'K3'
                 ? 'bg-orange-100 hover:bg-orange-200 border-b'
                 : 'bg-blue-100 hover:bg-blue-200 border-b';
+
+            // Si el cliente es no reportado (no encontrado), resaltar en rojo claro
+            if (item.reportado === false) {
+              carteraRowClass = 'bg-red-100 hover:bg-red-200 border-b';
+            }
 
             return (
               <tr key={`${item.clienteId}-${item.creditoId}-${index}`} className={carteraRowClass}>
