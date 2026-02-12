@@ -417,15 +417,24 @@ export const desarchivarCliente = async (req, res, next) => {
 
       // Para K1 y K3, si hay un cliente ocupando la posición, verificar si es del mismo tipo de pago
       // Si es del mismo tipo, la posición está ocupada. Si es de otro tipo, está disponible.
+      // Para K1 y K3, si hay un cliente ocupando la posición, verificar conflicto de tipos
+      // - Semanal ocupa su propia ranura
+      // - Quincenal y Mensual comparten ranura (conflictúan entre sí)
       if ((cartera === 'K1' || cartera === 'K3') && tipoPagoCliente && clienteOcupando) {
-        // Determinar el tipo de pago del cliente ocupante basándose en sus créditos activos
         const tipoPagoOcupante = obtenerTipoPagoCliente(clienteOcupando);
 
-        // Si el ocupante es del mismo tipo de pago, la posición está ocupada
-        if (tipoPagoOcupante === tipoPagoCliente) {
-          // La posición está ocupada por un cliente del mismo tipo
+        // Definir grupos de conflicto
+        const esGrupoQuincenalMensual = (t) => t === 'quincenal' || t === 'mensual';
+        const sonConflictivos = (t1, t2) => {
+          if (t1 === t2) return true; // Mismo tipo siempre conflictúa
+          if (esGrupoQuincenalMensual(t1) && esGrupoQuincenalMensual(t2)) return true; // Quincenal y Mensual conflictúan
+          return false;
+        };
+
+        if (sonConflictivos(tipoPagoCliente, tipoPagoOcupante)) {
+          // La posición está ocupada
         } else {
-          // La posición está ocupada pero por un cliente de diferente tipo, está disponible
+          // La posición está ocupada pero por un cliente de tipo compatible, está disponible para este tipo
           clienteOcupando = null;
         }
       }
@@ -463,7 +472,14 @@ export const desarchivarCliente = async (req, res, next) => {
 
         if ((cartera === 'K1' || cartera === 'K3') && tipoPagoCliente) {
           const tipoPagoOtroCliente = obtenerTipoPagoCliente(c);
-          return tipoPagoOtroCliente === tipoPagoCliente;
+
+          const esGrupoQuincenalMensual = (t) => t === 'quincenal' || t === 'mensual';
+
+          // Conflicto si es el mismo tipo o si ambos son del grupo quincenal/mensual
+          if (tipoPagoOtroCliente === tipoPagoCliente) return true;
+          if (esGrupoQuincenalMensual(tipoPagoOtroCliente) && esGrupoQuincenalMensual(tipoPagoCliente)) return true;
+
+          return false;
         }
 
         return false;
@@ -543,12 +559,20 @@ export const getPosicionesDisponibles = async (req, res, next) => {
       }
 
       // Para K1 y K3, filtrar por tipo de pago
-      if ((cartera === 'K1' || cartera === 'K3') && tipoPago && (tipoPago === 'semanal' || tipoPago === 'quincenal')) {
+      // Para K1 y K3, filtrar por tipo de pago considerando que Quincenal y Mensual comparten posiciones
+      if ((cartera === 'K1' || cartera === 'K3') && tipoPago) {
+        // Validación de tipos soportados
+        const tiposValidos = ['semanal', 'quincenal', 'mensual'];
+        if (!tiposValidos.includes(tipoPago)) {
+          // Si es un tipo raro, asumimos que no hay conflicto o manejamos como error?
+          // Por ahora, si no es válido, no ocupa
+          return false;
+        }
+
         // Obtener tipos de pago activos del cliente
         const tiposActivos = new Set();
         if (cliente.creditos && cliente.creditos.length > 0) {
           cliente.creditos.forEach(credito => {
-            // Verificar si el crédito tiene cuotas no pagadas (activo o en mora)
             const tieneCuotasPendientes = credito.cuotas && credito.cuotas.some(cuota => !cuota.pagado);
             if (tieneCuotasPendientes && credito.tipo) {
               tiposActivos.add(credito.tipo);
@@ -556,17 +580,21 @@ export const getPosicionesDisponibles = async (req, res, next) => {
           });
         }
 
-        // Si tiene créditos activos, usar esos tipos
-        // Si no tiene créditos pero tiene tipoPagoEsperado, usar ese
         const tiposDelCliente = tiposActivos.size > 0
           ? Array.from(tiposActivos)
           : (cliente.tipoPagoEsperado ? [cliente.tipoPagoEsperado] : []);
 
-        // Verificar si el cliente tiene el tipo de pago solicitado
-        return tiposDelCliente.includes(tipoPago);
+        // Lógica de conflicto
+        const esGrupoQuincenalMensual = (t) => t === 'quincenal' || t === 'mensual';
+
+        // El cliente ocupa la posición SI alguno de sus tipos entra en conflicto con el tipo solicitado
+        return tiposDelCliente.some(tipoCliente => {
+          if (tipoCliente === tipoPago) return true; // Mismo tipo
+          if (esGrupoQuincenalMensual(tipoCliente) && esGrupoQuincenalMensual(tipoPago)) return true; // Conflicto Q/M
+          return false;
+        });
       }
 
-      // Si no hay tipoPago especificado para K1 o K3, no incluir (no debería pasar)
       return false;
     });
 
