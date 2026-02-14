@@ -1,4 +1,5 @@
 import express from 'express';
+import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import morgan from 'morgan';
 import { connectDB } from './config/database.js';
@@ -12,7 +13,8 @@ import routes from './routes/index.js';
 dotenv.config();
 
 // Inicializar base de datos (o modo demo)
-const startServer = async () => {
+// Inicializar base de datos (o modo demo) y App
+export const createApp = async () => {
   // Conectar DB o inicializar store en memoria
   if (isDemoMode) {
     await store.init();
@@ -94,36 +96,41 @@ const startServer = async () => {
   app.use(notFound);
   app.use(errorHandler);
 
-  // Configurar puerto
-  const PORT = process.env.PORT || 5000;
-
-  // Iniciar servidor
-  app.listen(PORT, () => {
-    if (isDemoMode) {
-      console.log('');
-      console.log('╔══════════════════════════════════════════════╗');
-      console.log('║      🎭  MODO DEMO ACTIVO                   ║');
-      console.log('║  Los datos se almacenan solo en memoria      ║');
-      console.log('║  No se requiere MongoDB                      ║');
-      console.log('║  Reinicia el servidor para resetear datos    ║');
-      console.log('╚══════════════════════════════════════════════╝');
-      console.log('');
-      console.log('👤 Usuarios demo:');
-      console.log('   admin / demo123 (CEO - acceso total)');
-      console.log('   asesor / demo123 (Administrador)');
-      console.log('   cobrador / demo123 (Domiciliario)');
-      console.log('');
-    }
-    console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
-    console.log(`📝 Entorno: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`🌐 API disponible en: http://localhost:${PORT}/api`);
-  });
+  return app;
 };
 
-startServer().catch(err => {
-  console.error('❌ Error al iniciar el servidor:', err);
-  process.exit(1);
-});
+// Start server if main module
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  createApp().then(app => {
+    // Configurar puerto
+    const PORT = process.env.PORT || 5000;
+
+    // Iniciar servidor
+    app.listen(PORT, () => {
+      if (isDemoMode) {
+        console.log('');
+        console.log('╔══════════════════════════════════════════════╗');
+        console.log('║      🎭  MODO DEMO ACTIVO                   ║');
+        console.log('║  Los datos se almacenan solo en memoria      ║');
+        console.log('║  No se requiere MongoDB                      ║');
+        console.log('║  Reinicia el servidor para resetear datos    ║');
+        console.log('╚══════════════════════════════════════════════╝');
+        console.log('');
+        console.log('👤 Usuarios demo:');
+        console.log('   admin / demo123 (CEO - acceso total)');
+        console.log('   asesor / demo123 (Administrador)');
+        console.log('   cobrador / demo123 (Domiciliario)');
+        console.log('');
+      }
+      console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+      console.log(`📝 Entorno: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`🌐 API disponible en: http://localhost:${PORT}/api`);
+    });
+  }).catch(err => {
+    console.error('❌ Error al iniciar el servidor:', err);
+    process.exit(1);
+  });
+}
 
 // Manejo de errores no capturados
 process.on('unhandledRejection', (err) => {
