@@ -1,6 +1,7 @@
 import React from 'react';
 import { AlertTriangle, RefreshCcw } from 'lucide-react';
 import { BRANDING } from '../../config/branding';
+import api from '../../services/api';
 
 const DemoBanner = () => {
     if (!BRANDING.demoMode) return null;
@@ -8,14 +9,8 @@ const DemoBanner = () => {
     const handleReset = async () => {
         if (confirm('¿Estás seguro de que deseas reiniciar los datos de demostración? Se perderán todos los cambios realizados durante la sesión.')) {
             try {
-                const response = await fetch('http://localhost:5000/api/demo/reset', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
-                });
-                const data = await response.json();
-                if (data.success) {
+                const response = await api.post('/demo/reset');
+                if (response.success) {
                     alert('Datos reiniciados correctamente. La página se recargará.');
                     window.location.reload();
                 } else {
