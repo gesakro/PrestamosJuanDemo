@@ -95,6 +95,21 @@ const DiaDeCobro = () => {
   const [procesandoProrrogaGlobal, setProcesandoProrrogaGlobal] = useState(false);
   const [progresoProrroga, setProgresoProrroga] = useState({ actual: 0, total: 0 });
 
+  // Cargar órdenes de cobro desde el backend
+  const cargarOrdenesCobro = async (fecha) => {
+    try {
+      const response = await ordenCobroService.obtenerPorFecha(fecha);
+      if (response.success && response.data) {
+        setOrdenCobro(prev => ({
+          ...prev,
+          [fecha]: response.data
+        }));
+      }
+    } catch (error) {
+      console.error('Error al cargar órdenes de cobro:', error);
+    }
+  };
+
   // Cargar visitas y orden de cobro desde localStorage
   useEffect(() => {
     const cargarVisitas = () => {
@@ -168,6 +183,11 @@ const DiaDeCobro = () => {
   useEffect(() => {
     cargarProrrogas();
   }, []);
+
+  // Cargar órdenes de cobro cuando cambia la fecha seleccionada
+  useEffect(() => {
+    cargarOrdenesCobro(fechaSeleccionadaStr);
+  }, [fechaSeleccionadaStr]);
 
   // Filtrar clientes por búsqueda y excluir renovaciones activadas (RF)
   const clientesFiltrados = useMemo(() => {
