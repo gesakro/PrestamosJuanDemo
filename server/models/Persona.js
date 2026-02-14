@@ -129,7 +129,7 @@ const personaSchema = new mongoose.Schema({
   },
   ciudad: {
     type: String,
-    enum: ['Tuluá', 'Guadalajara de Buga'],
+    enum: ['Tuluá', 'Guadalajara de Buga', 'Ciudad Demo 1', 'Ciudad Demo 2'],
     required: function () {
       return this.role === 'domiciliario' || this.role === 'supervisor';
     },

@@ -1,271 +1,169 @@
-import mongoose from 'mongoose';
-import MovimientoCaja from '../models/MovimientoCaja.js';
-import Papeleria from '../models/Papeleria.js';
-import { registrarBorrado } from './historialBorradoController.js';
+import { isDemoMode } from '../config/demoMode.js';
+import store from '../repositories/inMemoryStore.js';
 
-/**
- * @desc    Obtener todos los movimientos de caja
- * @route   GET /api/movimientos-caja
- * @access  Private
- */
+let MovimientoCaja = null;
+let Papeleria = null;
+let registrarBorrado = null;
+
+if (!isDemoMode) {
+  const mongoose = await import('mongoose');
+  const movModule = await import('../models/MovimientoCaja.js');
+  const papModule = await import('../models/Papeleria.js');
+  const histCtrl = await import('./historialBorradoController.js');
+  MovimientoCaja = movModule.default;
+  Papeleria = papModule.default;
+  registrarBorrado = histCtrl.registrarBorrado;
+}
+
 export const getMovimientosCaja = async (req, res, next) => {
   try {
     const { tipo, tipoMovimiento, fechaInicio, fechaFin, page = 1, limit = 100 } = req.query;
 
+    if (isDemoMode) {
+      let results = store.findAll('movimientosCaja');
+      if (tipo) results = results.filter(m => m.tipo === tipo);
+      if (tipoMovimiento) results = results.filter(m => m.tipoMovimiento === tipoMovimiento);
+      if (fechaInicio) { const d = new Date(fechaInicio); d.setHours(0, 0, 0, 0); results = results.filter(m => new Date(m.fecha) >= d); }
+      if (fechaFin) { const d = new Date(fechaFin); d.setHours(23, 59, 59, 999); results = results.filter(m => new Date(m.fecha) <= d); }
+      results.sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+      const total = results.length;
+      const skip = (parseInt(page) - 1) * parseInt(limit);
+      const data = results.slice(skip, skip + parseInt(limit));
+
+      // Calcular totales
+      const totalesMap = {};
+      results.forEach(m => {
+        if (!totalesMap[m.tipo]) totalesMap[m.tipo] = 0;
+        totalesMap[m.tipo] += m.valor || 0;
+      });
+      const totales = Object.entries(totalesMap).map(([_id, total]) => ({ _id, total }));
+
+      return res.status(200).json({ success: true, count: data.length, total, totales, data });
+    }
+
     const query = {};
-
-    if (tipo) {
-      query.tipo = tipo;
-    }
-    if (tipoMovimiento) {
-      query.tipoMovimiento = tipoMovimiento;
-    }
-
+    if (tipo) query.tipo = tipo;
+    if (tipoMovimiento) query.tipoMovimiento = tipoMovimiento;
     if (fechaInicio || fechaFin) {
       query.fecha = {};
-      if (fechaInicio) {
-        const inicio = new Date(fechaInicio);
-        inicio.setHours(0, 0, 0, 0);
-        query.fecha.$gte = inicio;
-      }
-      if (fechaFin) {
-        const fin = new Date(fechaFin);
-        fin.setHours(23, 59, 59, 999);
-        query.fecha.$lte = fin;
-      }
+      if (fechaInicio) { const d = new Date(fechaInicio); d.setHours(0, 0, 0, 0); query.fecha.$gte = d; }
+      if (fechaFin) { const d = new Date(fechaFin); d.setHours(23, 59, 59, 999); query.fecha.$lte = d; }
     }
-
     const skip = (parseInt(page) - 1) * parseInt(limit);
-
-    const movimientos = await MovimientoCaja.find(query)
-      .sort({ fecha: -1, fechaCreacion: -1 })
-      .skip(skip)
-      .limit(parseInt(limit));
-
+    const movimientos = await MovimientoCaja.find(query).sort({ fecha: -1, fechaCreacion: -1 }).skip(skip).limit(parseInt(limit));
     const total = await MovimientoCaja.countDocuments(query);
-
-    // Calcular totales
-    const totales = await MovimientoCaja.aggregate([
-      { $match: query },
-      {
-        $group: {
-          _id: '$tipo',
-          total: { $sum: '$valor' }
-        }
-      }
-    ]);
-
-    res.status(200).json({
-      success: true,
-      count: movimientos.length,
-      total,
-      totales,
-      data: movimientos
-    });
-  } catch (error) {
-    next(error);
-  }
+    const totales = await MovimientoCaja.aggregate([{ $match: query }, { $group: { _id: '$tipo', total: { $sum: '$valor' } } }]);
+    res.status(200).json({ success: true, count: movimientos.length, total, totales, data: movimientos });
+  } catch (error) { next(error); }
 };
 
-/**
- * @desc    Obtener un movimiento de caja por ID
- * @route   GET /api/movimientos-caja/:id
- * @access  Private
- */
 export const getMovimientoCaja = async (req, res, next) => {
   try {
-    // Buscar por id o _id
-    const movimiento = await MovimientoCaja.findOne({
-      $or: [
-        { _id: req.params.id },
-        { id: req.params.id }
-      ]
-    });
-
-    if (!movimiento) {
-      return res.status(404).json({
-        success: false,
-        error: 'Movimiento de caja no encontrado'
-      });
+    if (isDemoMode) {
+      const m = store.findById('movimientosCaja', req.params.id) ||
+        store.findAll('movimientosCaja').find(x => x.id === req.params.id);
+      if (!m) return res.status(404).json({ success: false, error: 'Movimiento de caja no encontrado' });
+      return res.status(200).json({ success: true, data: m });
     }
-
-    res.status(200).json({
-      success: true,
-      data: movimiento
-    });
-  } catch (error) {
-    next(error);
-  }
+    const movimiento = await MovimientoCaja.findOne({ $or: [{ _id: req.params.id }, { id: req.params.id }] });
+    if (!movimiento) return res.status(404).json({ success: false, error: 'Movimiento de caja no encontrado' });
+    res.status(200).json({ success: true, data: movimiento });
+  } catch (error) { next(error); }
 };
 
-/**
- * @desc    Crear un nuevo movimiento de caja
- * @route   POST /api/movimientos-caja
- * @access  Private
- */
 export const createMovimientoCaja = async (req, res, next) => {
   try {
-    const movimientoData = { ...req.body };
+    const data = { ...req.body };
+    if (!data.id && !data._id) data.id = `MOV-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+    else if (data._id && !data.id) data.id = data._id.toString();
+    else if (data.id && !data._id) data._id = data.id;
 
-    // Generar ID único si no viene en los datos
-    if (!movimientoData.id && !movimientoData._id) {
-      movimientoData.id = `MOV-${new mongoose.Types.ObjectId().toString()}`;
-    } else if (movimientoData._id && !movimientoData.id) {
-      movimientoData.id = movimientoData._id.toString();
-    } else if (movimientoData.id && !movimientoData._id) {
-      movimientoData._id = movimientoData.id;
-    }
+    if (data.valor !== undefined) data.valor = Number(data.valor);
+    if (data.papeleria !== undefined) data.papeleria = Number(data.papeleria);
+    if (data.montoEntregado !== undefined) data.montoEntregado = Number(data.montoEntregado);
+    if (data.caja !== undefined) data.caja = Number(data.caja);
+    if (data.fecha) { const f = new Date(data.fecha); f.setHours(12, 0, 0, 0); data.fecha = f; }
+    if (!data.tipoMovimiento) data.tipoMovimiento = 'flujoCaja';
 
-    // Normalizar valores numéricos y de fecha
-    if (movimientoData.valor !== undefined) {
-      movimientoData.valor = Number(movimientoData.valor);
-    }
-    if (movimientoData.papeleria !== undefined) {
-      movimientoData.papeleria = Number(movimientoData.papeleria);
-    }
-    if (movimientoData.montoEntregado !== undefined) {
-      movimientoData.montoEntregado = Number(movimientoData.montoEntregado);
-    }
-    if (movimientoData.caja !== undefined) {
-      movimientoData.caja = Number(movimientoData.caja);
-    }
-    if (movimientoData.fecha) {
-      const fecha = new Date(movimientoData.fecha);
-      fecha.setHours(12, 0, 0, 0);
-      movimientoData.fecha = fecha;
-    }
-    if (!movimientoData.tipoMovimiento) {
-      movimientoData.tipoMovimiento = 'flujoCaja';
+    if (isDemoMode) {
+      const mov = store.create('movimientosCaja', data);
+      if (data.tipo === 'prestamo' && data.papeleria > 0) {
+        store.create('papeleria', {
+          tipo: 'ingreso', descripcion: `Papelería préstamo - ${data.descripcion || 'Sin descripción'}`,
+          cantidad: data.papeleria, fecha: data.fecha, movimientoId: mov._id,
+          caja: data.caja, tipoMovimiento: 'ingreso',
+          ciudadPapeleria: data.caja === 3 ? 'Ciudad Demo 2' : 'Ciudad Demo 1'
+        });
+      }
+      return res.status(201).json({ success: true, data: mov });
     }
 
-    const movimiento = await MovimientoCaja.create(movimientoData);
-
-    // Si es un préstamo y tiene valor de papelería, crear transacción de papelería automática
-    if (movimiento.tipo === 'prestamo' && movimiento.papeleria && movimiento.papeleria > 0) {
+    const mongoose = (await import('mongoose')).default;
+    if (!data.id) data.id = `MOV-${new mongoose.Types.ObjectId().toString()}`;
+    const movimiento = await MovimientoCaja.create(data);
+    if (movimiento.tipo === 'prestamo' && movimiento.papeleria > 0) {
       try {
         await Papeleria.create({
-          tipo: 'ingreso',
-          descripcion: `Papelería préstamo - ${movimiento.descripcion || 'Sin descripción'}`,
-          cantidad: movimiento.papeleria,
-          fecha: movimiento.fecha,
-          movimientoId: movimiento._id, // Enlazar con el movimiento original
-          caja: movimiento.caja,
-          tipoMovimiento: 'ingreso',
+          tipo: 'ingreso', descripcion: `Papelería préstamo - ${movimiento.descripcion || 'Sin descripción'}`,
+          cantidad: movimiento.papeleria, fecha: movimiento.fecha, movimientoId: movimiento._id,
+          caja: movimiento.caja, tipoMovimiento: 'ingreso',
           ciudadPapeleria: movimiento.caja === 3 ? 'Guadalajara de Buga' : 'Tuluá'
         });
-      } catch (papeleriaError) {
-        console.error('Error creando transacción de papelería automática:', papeleriaError);
-        // No fallamos la request principal, pero logueamos el error
-      }
+      } catch (e) { console.error('Error creando papelería automática:', e); }
     }
-
-    res.status(201).json({
-      success: true,
-      data: movimiento
-    });
-  } catch (error) {
-    next(error);
-  }
+    res.status(201).json({ success: true, data: movimiento });
+  } catch (error) { next(error); }
 };
 
-/**
- * @desc    Actualizar un movimiento de caja
- * @route   PUT /api/movimientos-caja/:id
- * @access  Private
- */
 export const updateMovimientoCaja = async (req, res, next) => {
   try {
-    // Buscar por id o _id
-    const movimiento = await MovimientoCaja.findOneAndUpdate(
-      {
-        $or: [
-          { _id: req.params.id },
-          { id: req.params.id }
-        ]
-      },
-      req.body,
-      {
-        new: true,
-        runValidators: true
-      }
-    );
-
-    if (!movimiento) {
-      return res.status(404).json({
-        success: false,
-        error: 'Movimiento de caja no encontrado'
-      });
+    if (isDemoMode) {
+      const m = store.findById('movimientosCaja', req.params.id) ||
+        store.findAll('movimientosCaja').find(x => x.id === req.params.id);
+      if (!m) return res.status(404).json({ success: false, error: 'Movimiento de caja no encontrado' });
+      const updated = store.update('movimientosCaja', m._id, req.body);
+      return res.status(200).json({ success: true, data: updated });
     }
-
-    res.status(200).json({
-      success: true,
-      data: movimiento
-    });
-  } catch (error) {
-    next(error);
-  }
+    const movimiento = await MovimientoCaja.findOneAndUpdate(
+      { $or: [{ _id: req.params.id }, { id: req.params.id }] }, req.body, { new: true, runValidators: true }
+    );
+    if (!movimiento) return res.status(404).json({ success: false, error: 'Movimiento de caja no encontrado' });
+    res.status(200).json({ success: true, data: movimiento });
+  } catch (error) { next(error); }
 };
 
-/**
- * @desc    Eliminar un movimiento de caja
- * @route   DELETE /api/movimientos-caja/:id
- * @access  Private
- */
 export const deleteMovimientoCaja = async (req, res, next) => {
   try {
-    // Buscar por id o _id
-    const movimiento = await MovimientoCaja.findOne({
-      $or: [
-        { _id: req.params.id },
-        { id: req.params.id }
-      ]
-    });
-
-    if (!movimiento) {
-      return res.status(404).json({
-        success: false,
-        error: 'Movimiento de caja no encontrado'
+    if (isDemoMode) {
+      const m = store.findById('movimientosCaja', req.params.id) ||
+        store.findAll('movimientosCaja').find(x => x.id === req.params.id);
+      if (!m) return res.status(404).json({ success: false, error: 'Movimiento de caja no encontrado' });
+      // Delete associated papeleria
+      const papItems = store.findAll('papeleria').filter(p => p.movimientoId === m._id);
+      papItems.forEach(p => store.delete('papeleria', p._id));
+      store.create('historialBorrados', {
+        tipo: 'movimiento-caja', idOriginal: req.params.id, detalles: m,
+        usuario: req.user._id, usuarioNombre: req.user.nombre,
+        metadata: { nombreItem: m.descripcion || 'Sin descripción', valor: m.valor, tipoCaja: m.tipo },
+        fechaBorrado: new Date()
       });
+      store.delete('movimientosCaja', m._id);
+      return res.status(200).json({ success: true, message: 'Movimiento de caja eliminado correctamente' });
     }
 
-    const movimientoEliminado = await MovimientoCaja.findOneAndDelete({
-      $or: [
-        { _id: req.params.id },
-        { id: req.params.id }
-      ]
-    });
-
-    // Eliminar transacción de papelería asociada si existe
+    const movimiento = await MovimientoCaja.findOne({ $or: [{ _id: req.params.id }, { id: req.params.id }] });
+    if (!movimiento) return res.status(404).json({ success: false, error: 'Movimiento de caja no encontrado' });
+    const deleted = await MovimientoCaja.findOneAndDelete({ $or: [{ _id: req.params.id }, { id: req.params.id }] });
     try {
-      if (movimientoEliminado) {
-        await Papeleria.findOneAndDelete({
-          movimientoId: movimientoEliminado._id
-        });
-
-        // Registrar en historial
+      if (deleted) {
+        await Papeleria.findOneAndDelete({ movimientoId: deleted._id });
         await registrarBorrado({
-          tipo: 'movimiento-caja',
-          idOriginal: req.params.id,
-          detalles: movimientoEliminado,
-          usuario: req.user._id,
-          usuarioNombre: req.user.nombre,
-          metadata: {
-            nombreItem: movimientoEliminado.descripcion || 'Sin descripción',
-            valor: movimientoEliminado.valor,
-            tipoCaja: movimientoEliminado.tipo,
-            motivo: req.body.motivo || 'No especificado'
-          }
+          tipo: 'movimiento-caja', idOriginal: req.params.id, detalles: deleted,
+          usuario: req.user._id, usuarioNombre: req.user.nombre,
+          metadata: { nombreItem: deleted.descripcion || 'Sin descripción', valor: deleted.valor, tipoCaja: deleted.tipo, motivo: req.body.motivo || 'No especificado' }
         });
       }
-    } catch (papeleriaError) {
-      console.error('Error eliminando transacción de papelería automática:', papeleriaError);
-    }
-
-    res.status(200).json({
-      success: true,
-      message: 'Movimiento de caja eliminado correctamente'
-    });
-  } catch (error) {
-    next(error);
-  }
+    } catch (e) { console.error('Error post-delete:', e); }
+    res.status(200).json({ success: true, message: 'Movimiento de caja eliminado correctamente' });
+  } catch (error) { next(error); }
 };

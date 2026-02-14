@@ -1,6 +1,6 @@
 import React from 'react';
-import { X, Download } from 'lucide-react';
-import CowImage from '../../Icon/Cow.png';
+import { X, Download, CreditCard } from 'lucide-react';
+import { BRANDING } from '../../config/branding';
 
 const CreditoDetalleHeader = ({ onClose, onPrint }) => {
   return (
@@ -8,13 +8,11 @@ const CreditoDetalleHeader = ({ onClose, onPrint }) => {
       {/* Logo y Nombre - Ocupa toda la fila en móvil, centrado en desktop */}
       <div className="flex-1 flex justify-center md:justify-start w-full md:w-auto">
         <div className="flex items-center space-x-2 md:space-x-4">
-          <img 
-            src={CowImage} 
-            alt="Vaca" 
-            className="w-16 h-16 md:w-20 md:h-20 object-contain"
-          />
-          <h1 className="text-2xl md:text-3xl font-bold text-blue-600 uppercase tracking-wide">
-            DISTRICARNES
+          <div className="bg-blue-100 p-2 rounded-full">
+            <CreditCard className="w-8 h-8 md:w-10 md:h-10 text-blue-600" />
+          </div>
+          <h1 className="text-2xl md:text-3xl font-bold text-gray-800 uppercase tracking-wide">
+            {BRANDING.appName}
           </h1>
         </div>
       </div>

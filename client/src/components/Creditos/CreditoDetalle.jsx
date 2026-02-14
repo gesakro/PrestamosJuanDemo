@@ -13,7 +13,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api';
-import CowImage from '../../Icon/Cow.png';
+import { BRANDING } from '../../config/branding';
 
 // Componentes
 import CreditoDetalleHeader from './CreditoDetalleHeader';
@@ -1018,13 +1018,8 @@ const CreditoDetalle = ({ credito: creditoInicial, clienteId, cliente, onClose, 
             {/* Header para el PDF (solo visible al imprimir, logo pequeño en esquina) */}
             <div className="hidden print:flex bg-white px-6 py-3 items-center justify-between border-b-2 border-blue-500 mb-8">
               <div className="flex items-center">
-                <img
-                  src={CowImage}
-                  alt="Vaca"
-                  className="w-10 h-10 object-contain mr-2"
-                />
                 <h1 className="text-2xl font-bold text-blue-600 uppercase tracking-wide">
-                  DISTRICARNES
+                  {BRANDING.appName}
                 </h1>
               </div>
             </div>

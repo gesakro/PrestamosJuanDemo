@@ -1,464 +1,160 @@
-import mongoose from 'mongoose';
-import Credito from '../models/Credito.js';
-import Cliente from '../models/Cliente.js';
-import { registrarBorrado } from './historialBorradoController.js';
+import { isDemoMode } from '../config/demoMode.js';
+import store from '../repositories/inMemoryStore.js';
 
-/**
- * @desc    Obtener todos los créditos
- * @route   GET /api/creditos
- * @access  Private
- */
-export const getCreditos = async (req, res, next) => {
-  try {
-    const { cliente, tipo, estado, page = 1, limit = 50 } = req.query;
+// Importar modelos solo si NO estamos en modo demo
+let Credito = null;
+let Cliente = null;
+let registrarBorrado = null;
 
-    const query = {};
+if (!isDemoMode) {
+  const mongoose = await import('mongoose');
+  const creditoModule = await import('../models/Credito.js');
+  const clienteModule = await import('../models/Cliente.js');
+  const historialCtrl = await import('./historialBorradoController.js');
+  Credito = creditoModule.default;
+  Cliente = clienteModule.default;
+  registrarBorrado = historialCtrl.registrarBorrado;
+}
 
-    if (cliente) {
-      query.cliente = cliente;
-    }
+// Helper: registrar borrado en demo
+function registrarBorradoDemo(data) {
+  store.create('historialBorrados', {
+    tipo: data.tipo, idOriginal: data.idOriginal, detalles: data.detalles,
+    usuario: data.usuario, usuarioNombre: data.usuarioNombre, metadata: data.metadata,
+    fechaBorrado: new Date()
+  });
+}
 
-    if (tipo) {
-      query.tipo = tipo;
-    }
+// Helper demo: sincronizar crédito con créditos embebidos del cliente
+function syncCreditoToClienteDemo(creditoId) {
+  const credito = store.findById('creditos', creditoId);
+  if (!credito) return;
+  const cliente = store.findById('clientes', credito.cliente);
+  if (!cliente) return;
 
-    // Solo aplicar filtro de cartera para domiciliarios
-    // Administradores y CEO ven todos los créditos (de todas las carteras)
-    if (req.user && req.user.role === 'domiciliario') {
-      if (req.user.ciudad === 'Guadalajara de Buga') {
-        // Domiciliarios de Buga solo ven créditos de clientes K3
-        const clientesIds = await Cliente.find({ cartera: 'K3' }).select('_id');
-        query.cliente = { $in: clientesIds.map(c => c._id.toString()) };
-      } else {
-        // Domiciliarios de Tuluá (u otra ciudad) solo ven créditos de clientes K1 y K2
-        const clientesIds = await Cliente.find({
-          $or: [
-            { cartera: 'K1' },
-            { cartera: 'K2' },
-            { cartera: { $exists: false } }
-          ]
-        }).select('_id');
-        query.cliente = { $in: clientesIds.map(c => c._id.toString()) };
-      }
-    }
-    // Si no es domiciliario (administrador o CEO), no se aplica filtro de cartera
+  const idx = (cliente.creditos || []).findIndex(c => c.id === creditoId || c._id === creditoId);
+  const creditoEmb = {
+    ...credito, id: creditoId, _id: creditoId
+  };
 
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-
-    const creditos = await Credito.find(query)
-      .populate('cliente', 'nombre documento telefono cartera')
-      .sort({ fechaCreacion: -1 })
-      .skip(skip)
-      .limit(parseInt(limit));
-
-    const total = await Credito.countDocuments(query);
-
-    res.status(200).json({
-      success: true,
-      count: creditos.length,
-      total,
-      data: creditos
-    });
-  } catch (error) {
-    next(error);
+  if (idx !== -1) {
+    cliente.creditos[idx] = creditoEmb;
+  } else {
+    cliente.creditos = cliente.creditos || [];
+    cliente.creditos.push(creditoEmb);
   }
-};
+  store.update('clientes', cliente._id, { creditos: cliente.creditos });
+}
 
-/**
- * @desc    Obtener un crédito por ID
- * @route   GET /api/creditos/:id
- * @access  Private
- */
-export const getCredito = async (req, res, next) => {
-  try {
-    const credito = await Credito.findById(req.params.id)
-      .populate('cliente');
-
-    if (!credito) {
-      return res.status(404).json({
-        success: false,
-        error: 'Crédito no encontrado'
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      data: credito
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * @desc    Crear un nuevo crédito
- * @route   POST /api/creditos
- * @access  Private
- */
-export const createCredito = async (req, res, next) => {
-  try {
-    const { clienteId, ...creditoData } = req.body;
-
-    // Verificar que el cliente existe
-    const cliente = await Cliente.findById(clienteId);
-    if (!cliente) {
-      return res.status(404).json({
-        success: false,
-        error: 'Cliente no encontrado'
-      });
-    }
-
-    // Generar ID único para el crédito (más robusto que Date.now())
-    const creditoId = creditoData.id || `CRED-${new mongoose.Types.ObjectId().toString()}`;
-
-    // Validar y preparar cuotas
-    const cuotasProcesadas = creditoData.cuotas.map(c => ({
-      ...c,
-      saldoPendiente: c.saldoPendiente !== undefined ? c.saldoPendiente : creditoData.valorCuota,
-      pagado: c.pagado || false
-    }));
-
-    // 1. Guardar en la colección Creditos
-    const credito = await Credito.create({
-      ...creditoData,
-      _id: creditoId,
-      cuotas: cuotasProcesadas,
-      cliente: clienteId
-    });
-
-    // 2. Preparar objeto embebido para el cliente (sin referencia circular)
-    const creditoEmbebido = {
-      id: creditoId,
-      monto: creditoData.monto,
-      papeleria: creditoData.papeleria || 0,
-      montoEntregado: creditoData.montoEntregado,
-      tipo: creditoData.tipo,
-      tipoQuincenal: creditoData.tipoQuincenal || null,
-      fechaInicio: creditoData.fechaInicio,
-      totalAPagar: creditoData.totalAPagar,
-      valorCuota: creditoData.valorCuota,
-      numCuotas: creditoData.numCuotas,
-      cuotas: cuotasProcesadas,
-      abonos: creditoData.abonos || [],
-      abonosMulta: creditoData.abonosMulta || [],
-      multas: creditoData.multas || [],
-      descuentos: creditoData.descuentos || [],
-      notas: creditoData.notas || [],
-      etiqueta: creditoData.etiqueta || null,
-      esRenovacion: creditoData.esRenovacion || false,
-      creditoAnteriorId: creditoData.creditoAnteriorId || null,
-      fechaCreacion: new Date()
-    };
-
-    // 3. Agregar el crédito embebido al cliente
-    cliente.creditos.push(creditoEmbebido);
-    await cliente.save();
-
-    const creditoPopulado = await Credito.findById(credito._id)
-      .populate('cliente');
-
-    res.status(201).json({
-      success: true,
-      data: creditoPopulado
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * Helper: Sincroniza el crédito de la colección Creditos al embebido en Cliente
- */
+// ===== Producción: sync helper =====
 const syncCreditoToCliente = async (creditoId) => {
+  if (isDemoMode) { syncCreditoToClienteDemo(creditoId); return; }
   try {
     const credito = await Credito.findById(creditoId);
     if (!credito) return;
-
     const cliente = await Cliente.findById(credito.cliente);
     if (!cliente) return;
-
-    // Buscar el crédito embebido por su id
     const idx = cliente.creditos.findIndex(c => c.id === creditoId || c.id === credito._id.toString());
-
     if (idx !== -1) {
-      // Actualizar el crédito embebido
-      // Usar el totalAPagar ya calculado por recalcularCreditoCompleto (considera abonos parciales)
-      // No recalcular aquí para evitar duplicaciones
-
       cliente.creditos[idx] = {
-        id: creditoId,
-        monto: credito.monto,
-        papeleria: credito.papeleria,
-        montoEntregado: credito.montoEntregado,
-        tipo: credito.tipo,
-        tipoQuincenal: credito.tipoQuincenal,
-        fechaInicio: credito.fechaInicio,
-        totalAPagar: credito.totalAPagar, // Usar el valor ya calculado por recalcularCreditoCompleto
-        valorCuota: credito.valorCuota,
-        numCuotas: credito.numCuotas,
-        cuotas: credito.cuotas,
-        abonos: credito.abonos,
-        abonosMulta: credito.abonosMulta || [],
-        multas: credito.multas,
-        descuentos: credito.descuentos,
-        notas: credito.notas,
-        etiqueta: credito.etiqueta,
-        fechaEtiqueta: credito.fechaEtiqueta,
-        renovado: credito.renovado,
-        fechaRenovacion: credito.fechaRenovacion,
-        creditoRenovacionId: credito.creditoRenovacionId,
-        esRenovacion: credito.esRenovacion,
-        creditoAnteriorId: credito.creditoAnteriorId,
+        id: creditoId, monto: credito.monto, papeleria: credito.papeleria,
+        montoEntregado: credito.montoEntregado, tipo: credito.tipo,
+        tipoQuincenal: credito.tipoQuincenal, fechaInicio: credito.fechaInicio,
+        totalAPagar: credito.totalAPagar, valorCuota: credito.valorCuota,
+        numCuotas: credito.numCuotas, cuotas: credito.cuotas, abonos: credito.abonos,
+        abonosMulta: credito.abonosMulta || [], multas: credito.multas,
+        descuentos: credito.descuentos, notas: credito.notas, etiqueta: credito.etiqueta,
+        fechaEtiqueta: credito.fechaEtiqueta, renovado: credito.renovado,
+        fechaRenovacion: credito.fechaRenovacion, creditoRenovacionId: credito.creditoRenovacionId,
+        esRenovacion: credito.esRenovacion, creditoAnteriorId: credito.creditoAnteriorId,
         fechaCreacion: credito.fechaCreacion
       };
       await cliente.save();
-    } else {
-      console.warn(`No se encontró crédito ${creditoId} embebido en cliente ${cliente._id} para sincronizar.`);
     }
   } catch (error) {
     console.error(`Error sincronizando crédito ${creditoId}:`, error);
   }
 };
 
-/**
- * @desc    Actualizar un crédito
- * @route   PUT /api/creditos/:id
- * @access  Private
- */
-export const updateCredito = async (req, res, next) => {
-  try {
-    let credito = await Credito.findById(req.params.id);
-
-    if (!credito) {
-      return res.status(404).json({
-        success: false,
-        error: 'Crédito no encontrado'
-      });
-    }
-
-    // Actualizar campos
-    Object.assign(credito, req.body);
-
-    // Recalcular totalAPagar si hay cambios en multas o cuotas
-    credito = recalcularCreditoCompleto(credito);
-
-    await credito.save();
-
-    // Sincronizar con el embebido en cliente
-    await syncCreditoToCliente(req.params.id);
-
-    const creditoActualizado = await Credito.findById(credito._id).populate('cliente');
-
-    res.status(200).json({
-      success: true,
-      data: credito
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * @desc    Eliminar un crédito
- * @route   DELETE /api/creditos/:id
- * @access  Private
- */
-export const deleteCredito = async (req, res, next) => {
-  try {
-    const credito = await Credito.findById(req.params.id).populate('cliente');
-
-    if (!credito) {
-      return res.status(404).json({
-        success: false,
-        error: 'Crédito no encontrado'
-      });
-    }
-
-    // Remover el crédito embebido del cliente
-    const cliente = await Cliente.findById(credito.cliente);
-    if (cliente) {
-      cliente.creditos = cliente.creditos.filter(c => c.id !== req.params.id && c.id !== credito._id.toString());
-      await cliente.save();
-    }
-
-    // Eliminar el crédito de la colección
-    await Credito.findByIdAndDelete(req.params.id);
-
-    // Registrar en historial
-    await registrarBorrado({
-      tipo: 'credito',
-      idOriginal: req.params.id,
-      detalles: credito,
-      usuario: req.user._id,
-      usuarioNombre: req.user.nombre,
-      metadata: {
-        clienteId: credito.cliente?._id || credito.cliente,
-        nombreCliente: credito.cliente?.nombre || 'Desconocido',
-        monto: credito.monto
-      }
-    });
-
-    res.status(200).json({
-      success: true,
-      message: 'Crédito eliminado correctamente'
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-/**
- * Función Helper: Recalcular saldos de todas las cuotas basándose en multas y abonos.
- * Implementa lógica "Waterfall" (Cascada) similar al frontend para consistencia en BD.
- */
+// ===== recalcularCreditoCompleto — lógica pura, sin dependencia de DB =====
 const recalcularCreditoCompleto = (credito) => {
-  // 1. Resetear el estado de todas las cuotas a valores iniciales
+  // 1. Resetear cuotas
   credito.cuotas.forEach(cuota => {
-    // Ya no sumamos multas aquí, son independientes
     cuota.saldoPendiente = credito.valorCuota;
-    cuota.abonoAplicado = 0;   // Campo virtual/auxiliar
-
-    // Reset flags
+    cuota.abonoAplicado = 0;
     cuota.pagado = false;
     cuota.tieneAbono = false;
-
-    // Limpiar abonosCuota embebidos
     cuota.abonosCuota = [];
   });
 
-  // Resetear estado de multas y calcular saldo pendiente
+  // Resetear multas
   if (credito.multas) {
-    credito.multas.forEach(m => {
-      m.pagada = false;
-      m.abonoAplicado = 0; // Campo auxiliar para calcular saldo
-    });
+    credito.multas.forEach(m => { m.pagada = false; m.abonoAplicado = 0; });
   }
 
-  // 2. Procesar Abonos de Multas (completamente independientes de abonos de cuotas)
+  // 2. Procesar Abonos de Multas
   if (credito.abonosMulta && credito.abonosMulta.length > 0) {
     credito.abonosMulta.forEach(abonoMulta => {
       const multa = credito.multas ? credito.multas.find(m => m.id === abonoMulta.multaId) : null;
       if (multa) {
-        // Acumular abonos a esta multa
         multa.abonoAplicado = (multa.abonoAplicado || 0) + abonoMulta.valor;
-        // La multa está pagada solo si el abono aplicado >= valor de la multa
         multa.pagada = (multa.abonoAplicado || 0) >= multa.valor;
       }
     });
   }
 
-  // 3. Ordenar abonos de cuotas cronológicamente para aplicación correcta
+  // 3. Ordenar abonos cronológicamente
   const abonosOrdenados = [...(credito.abonos || [])].sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
-
-  // Mapa para rastrear la fecha del último abono que completó el pago de cada cuota
   const fechaPagoPorCuota = {};
 
-  // 4. Procesar Abonos de Cuotas (solo abonos, no multas)
+  // 4. Procesar Abonos de Cuotas
   for (const abono of abonosOrdenados) {
     let montoDisponible = abono.valor;
     let nroCuotaTarget = abono.nroCuota;
 
-    // Intentar deducir cuota de la descripción si no está explícita (compatibilidad)
     if (!nroCuotaTarget && abono.descripcion) {
       const match = abono.descripcion.match(/(?:Cuota|cuota)\s*#(\d+)/);
       if (match) nroCuotaTarget = parseInt(match[1], 10);
     }
 
     if (nroCuotaTarget) {
-      // A. Abono Específico a Cuota
       const cuota = credito.cuotas.find(c => c.nroCuota === nroCuotaTarget);
       if (cuota) {
         const saldoAntes = cuota.saldoPendiente;
-
         cuota.abonosCuota.push({
-          id: abono.id,
-          valor: montoDisponible,
-          fecha: abono.fecha,
+          id: abono.id, valor: montoDisponible, fecha: abono.fecha,
           fechaCreacion: abono.fechaCreacion || new Date()
         });
-
         cuota.abonoAplicado = (cuota.abonoAplicado || 0) + montoDisponible;
         cuota.saldoPendiente -= montoDisponible;
-
-        // Si este abono completó el pago (saldo pendiente <= 10), guardar su fecha
-        if (saldoAntes > 10 && cuota.saldoPendiente <= 10) {
-          fechaPagoPorCuota[nroCuotaTarget] = abono.fecha;
-        }
+        if (saldoAntes > 10 && cuota.saldoPendiente <= 10) fechaPagoPorCuota[nroCuotaTarget] = abono.fecha;
       }
     } else {
-      // B. Abono General (Waterfall) 
       for (const cuota of credito.cuotas) {
         if (montoDisponible <= 0) break;
         if (cuota.saldoPendiente <= 0) continue;
-
         const saldoAntes = cuota.saldoPendiente;
         const aplicar = Math.min(montoDisponible, cuota.saldoPendiente);
         cuota.saldoPendiente -= aplicar;
         cuota.abonoAplicado = (cuota.abonoAplicado || 0) + aplicar;
-
-        // Si este abono completó el pago (saldo pendiente <= 10), guardar su fecha
-        if (saldoAntes > 10 && cuota.saldoPendiente <= 10) {
-          fechaPagoPorCuota[cuota.nroCuota] = abono.fecha;
-        }
-
+        if (saldoAntes > 10 && cuota.saldoPendiente <= 10) fechaPagoPorCuota[cuota.nroCuota] = abono.fecha;
         montoDisponible -= aplicar;
       }
     }
   }
 
-  // 4. Finalizar Estados
+  // 5. Finalizar estados
   credito.cuotas.forEach(cuota => {
     if (cuota.saldoPendiente < 0) cuota.saldoPendiente = 0;
     cuota.pagado = cuota.saldoPendiente <= 10;
     cuota.tieneAbono = cuota.abonoAplicado > 0;
-
     if (cuota.pagado) {
-      // Usar la fecha del abono que completó el pago, o la fecha más reciente de abonosCuota, o la fecha actual como fallback
-      if (fechaPagoPorCuota[cuota.nroCuota]) {
-        // Asegurar que la fecha se guarde correctamente sin problemas de zona horaria
-        const fechaAbono = fechaPagoPorCuota[cuota.nroCuota];
-        if (fechaAbono instanceof Date) {
-          // Si ya es un Date, extraer la fecha (año, mes, día) y crear uno nuevo en UTC
-          const year = fechaAbono.getUTCFullYear();
-          const month = fechaAbono.getUTCMonth();
-          const day = fechaAbono.getUTCDate();
-          cuota.fechaPago = new Date(Date.UTC(year, month, day, 12, 0, 0, 0));
-        } else if (typeof fechaAbono === 'string') {
-          // Si es string, normalizar a Date en UTC mediodía para evitar problemas de zona horaria
-          const partes = fechaAbono.split('T')[0].split('-');
-          if (partes.length === 3) {
-            cuota.fechaPago = new Date(Date.UTC(parseInt(partes[0]), parseInt(partes[1]) - 1, parseInt(partes[2]), 12, 0, 0, 0));
-          } else {
-            cuota.fechaPago = new Date(fechaAbono);
-          }
-        } else {
-          cuota.fechaPago = new Date(fechaAbono);
-        }
+      const fp = fechaPagoPorCuota[cuota.nroCuota];
+      if (fp) {
+        cuota.fechaPago = normalizarFecha(fp);
       } else if (cuota.abonosCuota && cuota.abonosCuota.length > 0) {
-        // Si no hay fecha registrada, usar la fecha del último abono aplicado
-        const ultimoAbono = cuota.abonosCuota[cuota.abonosCuota.length - 1];
-        if (ultimoAbono.fecha) {
-          if (ultimoAbono.fecha instanceof Date) {
-            // Extraer la fecha (año, mes, día) y crear uno nuevo en UTC
-            const year = ultimoAbono.fecha.getUTCFullYear();
-            const month = ultimoAbono.fecha.getUTCMonth();
-            const day = ultimoAbono.fecha.getUTCDate();
-            cuota.fechaPago = new Date(Date.UTC(year, month, day, 12, 0, 0, 0));
-          } else if (typeof ultimoAbono.fecha === 'string') {
-            const partes = ultimoAbono.fecha.split('T')[0].split('-');
-            if (partes.length === 3) {
-              cuota.fechaPago = new Date(Date.UTC(parseInt(partes[0]), parseInt(partes[1]) - 1, parseInt(partes[2]), 12, 0, 0, 0));
-            } else {
-              cuota.fechaPago = new Date(ultimoAbono.fecha);
-            }
-          } else {
-            cuota.fechaPago = new Date(ultimoAbono.fecha);
-          }
-        } else {
-          cuota.fechaPago = new Date();
-        }
+        cuota.fechaPago = normalizarFecha(cuota.abonosCuota[cuota.abonosCuota.length - 1].fecha);
       } else if (!cuota.fechaPago) {
-        // Fallback: usar fecha actual solo si no hay fecha previa
         cuota.fechaPago = new Date();
       }
     } else {
@@ -466,328 +162,502 @@ const recalcularCreditoCompleto = (credito) => {
     }
   });
 
-  // 5. Recalcular totalAPagar: incluir saldo pendiente de multas (considerando abonos parciales)
+  // 6. Recalcular totalAPagar
   let totalMultasPendientes = 0;
   if (credito.multas) {
     credito.multas.forEach(multa => {
-      const abonoAplicado = multa.abonoAplicado || 0;
-      const saldoPendiente = multa.valor - abonoAplicado;
-      if (saldoPendiente > 0) {
-        totalMultasPendientes += saldoPendiente;
-      }
+      const saldo = multa.valor - (multa.abonoAplicado || 0);
+      if (saldo > 0) totalMultasPendientes += saldo;
     });
   }
-
-  // totalAPagar = (valorCuota * numCuotas) + saldoPendienteMultas
-  const totalCuotas = credito.valorCuota * credito.numCuotas;
-  credito.totalAPagar = totalCuotas + totalMultasPendientes;
-
+  credito.totalAPagar = (credito.valorCuota * credito.numCuotas) + totalMultasPendientes;
   return credito;
 };
 
-/**
- * @desc    Registrar un pago (Marca cuota como pagada totalmente mediante un abono automático del saldo restante)
- * @route   PUT /api/creditos/:id/pagos
- * @access  Private
- */
+// Helper para normalizar fechas
+function normalizarFecha(fecha) {
+  if (!fecha) return new Date();
+  if (fecha instanceof Date) {
+    return new Date(Date.UTC(fecha.getUTCFullYear(), fecha.getUTCMonth(), fecha.getUTCDate(), 12, 0, 0, 0));
+  }
+  if (typeof fecha === 'string') {
+    const partes = fecha.split('T')[0].split('-');
+    if (partes.length === 3) {
+      return new Date(Date.UTC(parseInt(partes[0]), parseInt(partes[1]) - 1, parseInt(partes[2]), 12, 0, 0, 0));
+    }
+  }
+  return new Date(fecha);
+}
+
+// ==============================================================
+// GET CREDITOS
+// ==============================================================
+export const getCreditos = async (req, res, next) => {
+  try {
+    const { cliente, tipo, page = 1, limit = 50 } = req.query;
+
+    if (isDemoMode) {
+      let results = store.findAll('creditos');
+      if (cliente) results = results.filter(c => c.cliente === cliente);
+      if (tipo) results = results.filter(c => c.tipo === tipo);
+
+      // Filtro por rol
+      if (req.user && req.user.role === 'domiciliario') {
+        const clientes = store.findAll('clientes');
+        let clienteIds;
+        if (req.user.ciudad === 'Ciudad Demo 2') {
+          clienteIds = clientes.filter(c => c.cartera === 'K3').map(c => c._id);
+        } else {
+          clienteIds = clientes.filter(c => c.cartera === 'K1' || c.cartera === 'K2' || !c.cartera).map(c => c._id);
+        }
+        results = results.filter(c => clienteIds.includes(c.cliente));
+      }
+
+      results.sort((a, b) => new Date(b.fechaCreacion) - new Date(a.fechaCreacion));
+      const total = results.length;
+      const skip = (parseInt(page) - 1) * parseInt(limit);
+      const data = results.slice(skip, skip + parseInt(limit));
+
+      // Enriquecer con datos del cliente
+      const enriched = data.map(cr => {
+        const cl = store.findById('clientes', cr.cliente);
+        return { ...cr, cliente: cl ? { _id: cl._id, nombre: cl.nombre, documento: cl.documento, telefono: cl.telefono, cartera: cl.cartera } : cr.cliente };
+      });
+
+      return res.status(200).json({ success: true, count: enriched.length, total, data: enriched });
+    }
+
+    // ---- PRODUCCIÓN ----
+    const query = {};
+    if (cliente) query.cliente = cliente;
+    if (tipo) query.tipo = tipo;
+
+    if (req.user && req.user.role === 'domiciliario') {
+      if (req.user.ciudad === 'Guadalajara de Buga') {
+        const ids = await Cliente.find({ cartera: 'K3' }).select('_id');
+        query.cliente = { $in: ids.map(c => c._id.toString()) };
+      } else {
+        const ids = await Cliente.find({ $or: [{ cartera: 'K1' }, { cartera: 'K2' }, { cartera: { $exists: false } }] }).select('_id');
+        query.cliente = { $in: ids.map(c => c._id.toString()) };
+      }
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const creditos = await Credito.find(query).populate('cliente', 'nombre documento telefono cartera').sort({ fechaCreacion: -1 }).skip(skip).limit(parseInt(limit));
+    const total = await Credito.countDocuments(query);
+
+    res.status(200).json({ success: true, count: creditos.length, total, data: creditos });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ==============================================================
+// GET CREDITO BY ID
+// ==============================================================
+export const getCredito = async (req, res, next) => {
+  try {
+    if (isDemoMode) {
+      const credito = store.findById('creditos', req.params.id);
+      if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+      const cl = store.findById('clientes', credito.cliente);
+      return res.status(200).json({ success: true, data: { ...credito, cliente: cl || credito.cliente } });
+    }
+    const credito = await Credito.findById(req.params.id).populate('cliente');
+    if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+    res.status(200).json({ success: true, data: credito });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ==============================================================
+// CREATE CREDITO
+// ==============================================================
+export const createCredito = async (req, res, next) => {
+  try {
+    const { clienteId, ...creditoData } = req.body;
+
+    if (isDemoMode) {
+      const cliente = store.findById('clientes', clienteId);
+      if (!cliente) return res.status(404).json({ success: false, error: 'Cliente no encontrado' });
+
+      const creditoId = creditoData.id || `CRED-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+      const cuotasProcesadas = (creditoData.cuotas || []).map(c => ({
+        ...c,
+        saldoPendiente: c.saldoPendiente !== undefined ? c.saldoPendiente : creditoData.valorCuota,
+        pagado: c.pagado || false
+      }));
+
+      const credito = store.create('creditos', {
+        ...creditoData, _id: creditoId, cuotas: cuotasProcesadas, cliente: clienteId,
+        abonos: creditoData.abonos || [], abonosMulta: creditoData.abonosMulta || [],
+        multas: creditoData.multas || [], descuentos: creditoData.descuentos || [],
+        notas: creditoData.notas || [], fechaCreacion: new Date()
+      });
+
+      // Embebir en cliente
+      syncCreditoToClienteDemo(creditoId);
+      const cl = store.findById('clientes', clienteId);
+      return res.status(201).json({ success: true, data: { ...credito, cliente: cl || clienteId } });
+    }
+
+    // ---- PRODUCCIÓN ----
+    const cliente = await Cliente.findById(clienteId);
+    if (!cliente) return res.status(404).json({ success: false, error: 'Cliente no encontrado' });
+
+    const mongoose = (await import('mongoose')).default;
+    const creditoId = creditoData.id || `CRED-${new mongoose.Types.ObjectId().toString()}`;
+    const cuotasProcesadas = creditoData.cuotas.map(c => ({
+      ...c,
+      saldoPendiente: c.saldoPendiente !== undefined ? c.saldoPendiente : creditoData.valorCuota,
+      pagado: c.pagado || false
+    }));
+
+    const credito = await Credito.create({ ...creditoData, _id: creditoId, cuotas: cuotasProcesadas, cliente: clienteId });
+
+    const creditoEmbebido = {
+      id: creditoId, monto: creditoData.monto, papeleria: creditoData.papeleria || 0,
+      montoEntregado: creditoData.montoEntregado, tipo: creditoData.tipo,
+      tipoQuincenal: creditoData.tipoQuincenal || null, fechaInicio: creditoData.fechaInicio,
+      totalAPagar: creditoData.totalAPagar, valorCuota: creditoData.valorCuota,
+      numCuotas: creditoData.numCuotas, cuotas: cuotasProcesadas,
+      abonos: creditoData.abonos || [], abonosMulta: creditoData.abonosMulta || [],
+      multas: creditoData.multas || [], descuentos: creditoData.descuentos || [],
+      notas: creditoData.notas || [], etiqueta: creditoData.etiqueta || null,
+      esRenovacion: creditoData.esRenovacion || false,
+      creditoAnteriorId: creditoData.creditoAnteriorId || null, fechaCreacion: new Date()
+    };
+
+    cliente.creditos.push(creditoEmbebido);
+    await cliente.save();
+
+    const creditoPopulado = await Credito.findById(credito._id).populate('cliente');
+    res.status(201).json({ success: true, data: creditoPopulado });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ==============================================================
+// UPDATE CREDITO
+// ==============================================================
+export const updateCredito = async (req, res, next) => {
+  try {
+    if (isDemoMode) {
+      let credito = store.findById('creditos', req.params.id);
+      if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+      Object.assign(credito, req.body);
+      credito = recalcularCreditoCompleto(credito);
+      store.update('creditos', req.params.id, credito);
+      syncCreditoToClienteDemo(req.params.id);
+      const cl = store.findById('clientes', credito.cliente);
+      return res.status(200).json({ success: true, data: { ...credito, cliente: cl || credito.cliente } });
+    }
+
+    let credito = await Credito.findById(req.params.id);
+    if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+    Object.assign(credito, req.body);
+    credito = recalcularCreditoCompleto(credito);
+    await credito.save();
+    await syncCreditoToCliente(req.params.id);
+    res.status(200).json({ success: true, data: credito });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ==============================================================
+// DELETE CREDITO
+// ==============================================================
+export const deleteCredito = async (req, res, next) => {
+  try {
+    if (isDemoMode) {
+      const credito = store.findById('creditos', req.params.id);
+      if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+      const cliente = store.findById('clientes', credito.cliente);
+      if (cliente) {
+        cliente.creditos = (cliente.creditos || []).filter(c => c.id !== req.params.id && c._id !== req.params.id);
+        store.update('clientes', cliente._id, { creditos: cliente.creditos });
+      }
+      registrarBorradoDemo({
+        tipo: 'credito', idOriginal: req.params.id, detalles: credito,
+        usuario: req.user._id, usuarioNombre: req.user.nombre,
+        metadata: { clienteId: credito.cliente, nombreCliente: cliente?.nombre || 'Desconocido', monto: credito.monto }
+      });
+      store.delete('creditos', req.params.id);
+      return res.status(200).json({ success: true, message: 'Crédito eliminado correctamente' });
+    }
+
+    const credito = await Credito.findById(req.params.id).populate('cliente');
+    if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+    const cliente = await Cliente.findById(credito.cliente);
+    if (cliente) {
+      cliente.creditos = cliente.creditos.filter(c => c.id !== req.params.id && c.id !== credito._id.toString());
+      await cliente.save();
+    }
+    await Credito.findByIdAndDelete(req.params.id);
+    await registrarBorrado({
+      tipo: 'credito', idOriginal: req.params.id, detalles: credito,
+      usuario: req.user._id, usuarioNombre: req.user.nombre,
+      metadata: { clienteId: credito.cliente?._id || credito.cliente, nombreCliente: credito.cliente?.nombre || 'Desconocido', monto: credito.monto }
+    });
+    res.status(200).json({ success: true, message: 'Crédito eliminado correctamente' });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ==============================================================
+// REGISTRAR PAGO
+// ==============================================================
 export const registrarPago = async (req, res, next) => {
   try {
     const { nroCuota, fechaPago } = req.body;
     const nroCuotaInt = parseInt(nroCuota, 10);
-    let credito = await Credito.findById(req.params.id);
 
-    if (!credito) {
-      return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
-    }
+    if (isDemoMode) {
+      let credito = store.findById('creditos', req.params.id);
+      if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
 
-    // 1. Encontrar la cuota para saber cuánto debe
-    // Primero, hacemos un recálculo rápido para saber el saldo real actual antes de pagar
-    credito = recalcularCreditoCompleto(credito);
+      credito = recalcularCreditoCompleto(credito);
+      const cuota = credito.cuotas.find(c => c.nroCuota === nroCuotaInt);
+      if (!cuota) return res.status(404).json({ success: false, error: 'Cuota no encontrada' });
 
-    const cuota = credito.cuotas.find(c => c.nroCuota === nroCuotaInt);
-    if (!cuota) {
-      return res.status(404).json({ success: false, error: 'Cuota no encontrada' });
-    }
-
-    const saldoPendiente = cuota.saldoPendiente;
-
-    if (saldoPendiente > 0) {
-      // 2. Normalizar la fecha de pago para evitar problemas de zona horaria
-      let fechaPagoNormalizada = new Date();
-      if (fechaPago) {
-        if (typeof fechaPago === 'string') {
-          // Si viene como string YYYY-MM-DD, crear Date en UTC mediodía para evitar problemas de zona horaria
-          const partes = fechaPago.split('T')[0].split('-');
-          if (partes.length === 3) {
-            // Usar UTC para que la fecha se mantenga correcta independientemente de la zona horaria del servidor
-            fechaPagoNormalizada = new Date(Date.UTC(parseInt(partes[0]), parseInt(partes[1]) - 1, parseInt(partes[2]), 12, 0, 0, 0));
-          } else {
-            fechaPagoNormalizada = new Date(fechaPago);
-          }
-        } else if (fechaPago instanceof Date) {
-          fechaPagoNormalizada = fechaPago;
-        } else {
-          fechaPagoNormalizada = new Date(fechaPago);
-        }
+      if (cuota.saldoPendiente > 0) {
+        const fechaNorm = fechaPago ? normalizarFecha(fechaPago) : new Date();
+        credito.abonos = credito.abonos || [];
+        credito.abonos.push({
+          id: Date.now().toString(), valor: cuota.saldoPendiente,
+          descripcion: `Pago total Cuota #${nroCuotaInt}`, fecha: fechaNorm,
+          tipo: 'abono', nroCuota: nroCuotaInt
+        });
+        credito = recalcularCreditoCompleto(credito);
+        store.update('creditos', req.params.id, credito);
+        syncCreditoToClienteDemo(req.params.id);
       }
 
-      // 3. Crear un abono por el valor exacto del saldo pendiente
-      const nuevoAbono = {
-        id: Date.now().toString(),
-        valor: saldoPendiente,
-        descripcion: `Pago total Cuota #${nroCuotaInt}`,
-        fecha: fechaPagoNormalizada,
-        tipo: 'abono',
-        nroCuota: nroCuotaInt
-      };
+      const cl = store.findById('clientes', credito.cliente);
+      return res.status(200).json({ success: true, data: { ...credito, cliente: cl || credito.cliente } });
+    }
 
-      credito.abonos.push(nuevoAbono);
+    // ---- PRODUCCIÓN ----
+    let credito = await Credito.findById(req.params.id);
+    if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+    credito = recalcularCreditoCompleto(credito);
+    const cuota = credito.cuotas.find(c => c.nroCuota === nroCuotaInt);
+    if (!cuota) return res.status(404).json({ success: false, error: 'Cuota no encontrada' });
 
-      // 3. Recalcular nuevamente para aplicar cambios y actualizar estados
+    if (cuota.saldoPendiente > 0) {
+      const fechaNorm = fechaPago ? normalizarFecha(fechaPago) : new Date();
+      credito.abonos.push({
+        id: Date.now().toString(), valor: cuota.saldoPendiente,
+        descripcion: `Pago total Cuota #${nroCuotaInt}`, fecha: fechaNorm,
+        tipo: 'abono', nroCuota: nroCuotaInt
+      });
       credito = recalcularCreditoCompleto(credito);
-
       await credito.save();
       await syncCreditoToCliente(req.params.id);
     }
 
     const creditoActualizado = await Credito.findById(credito._id).populate('cliente');
-
-    res.status(200).json({
-      success: true,
-      data: creditoActualizado
-    });
+    res.status(200).json({ success: true, data: creditoActualizado });
   } catch (error) {
     next(error);
   }
 };
 
-/**
- * @desc    Agregar una nota a un crédito
- * @route   POST /api/creditos/:id/notas
- * @access  Private
- */
+// ==============================================================
+// AGREGAR NOTA
+// ==============================================================
 export const agregarNota = async (req, res, next) => {
   try {
     const { texto } = req.body;
-    const credito = await Credito.findById(req.params.id);
 
-    if (!credito) {
-      return res.status(404).json({
-        success: false,
-        error: 'Crédito no encontrado'
-      });
+    if (isDemoMode) {
+      const credito = store.findById('creditos', req.params.id);
+      if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+      credito.notas = credito.notas || [];
+      credito.notas.push({ id: Date.now().toString(), texto, fecha: new Date() });
+      store.update('creditos', req.params.id, { notas: credito.notas });
+      syncCreditoToClienteDemo(req.params.id);
+      const cl = store.findById('clientes', credito.cliente);
+      return res.status(201).json({ success: true, data: { ...store.findById('creditos', req.params.id), cliente: cl || credito.cliente } });
     }
 
-    const nuevaNota = {
-      id: Date.now().toString(),
-      texto,
-      fecha: new Date()
-    };
-
-    credito.notas.push(nuevaNota);
+    const credito = await Credito.findById(req.params.id);
+    if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+    credito.notas.push({ id: Date.now().toString(), texto, fecha: new Date() });
     await credito.save();
-
-    // Sincronizar con el embebido en cliente
     await syncCreditoToCliente(req.params.id);
-
-    const creditoActualizado = await Credito.findById(credito._id)
-      .populate('cliente');
-
-    res.status(201).json({
-      success: true,
-      data: creditoActualizado
-    });
+    const creditoActualizado = await Credito.findById(credito._id).populate('cliente');
+    res.status(201).json({ success: true, data: creditoActualizado });
   } catch (error) {
     next(error);
   }
 };
 
-/**
- * @desc    Eliminar una nota de un crédito
- * @route   DELETE /api/creditos/:id/notas/:notaId
- * @access  Private
- */
+// ==============================================================
+// ELIMINAR NOTA
+// ==============================================================
 export const eliminarNota = async (req, res, next) => {
   try {
     const { id, notaId } = req.params;
+
+    if (isDemoMode) {
+      const credito = store.findById('creditos', id);
+      if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+      const nota = (credito.notas || []).find(n => n.id === notaId);
+      if (!nota) return res.status(404).json({ success: false, error: 'Nota no encontrada' });
+      credito.notas = credito.notas.filter(n => n.id !== notaId);
+      store.update('creditos', id, { notas: credito.notas });
+      registrarBorradoDemo({
+        tipo: 'nota', idOriginal: notaId, detalles: nota,
+        usuario: req.user._id, usuarioNombre: req.user.nombre,
+        metadata: { creditoId: id, textoNota: nota.texto }
+      });
+      syncCreditoToClienteDemo(id);
+      const cl = store.findById('clientes', credito.cliente);
+      return res.status(200).json({ success: true, data: { ...store.findById('creditos', id), cliente: cl || credito.cliente } });
+    }
+
     const credito = await Credito.findById(id).populate('cliente');
-
-    if (!credito) {
-      return res.status(404).json({
-        success: false,
-        error: 'Crédito no encontrado'
-      });
-    }
-
-    const notaIndex = credito.notas.findIndex(n => n.id === notaId);
-    if (notaIndex === -1) {
-      return res.status(404).json({
-        success: false,
-        error: 'Nota no encontrada'
-      });
-    }
-
-    const notaEliminada = credito.notas[notaIndex];
+    if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+    const notaI = credito.notas.findIndex(n => n.id === notaId);
+    if (notaI === -1) return res.status(404).json({ success: false, error: 'Nota no encontrada' });
+    const notaEliminada = credito.notas[notaI];
     credito.notas = credito.notas.filter(n => n.id !== notaId);
     await credito.save();
-
-    // Registrar en historial
     await registrarBorrado({
-      tipo: 'nota',
-      idOriginal: notaId,
-      detalles: notaEliminada,
-      usuario: req.user._id,
-      usuarioNombre: req.user.nombre,
-      metadata: {
-        creditoId: id,
-        textoNota: notaEliminada.texto,
-        nombreCliente: credito.cliente?.nombre || 'Desconocido'
-      }
+      tipo: 'nota', idOriginal: notaId, detalles: notaEliminada,
+      usuario: req.user._id, usuarioNombre: req.user.nombre,
+      metadata: { creditoId: id, textoNota: notaEliminada.texto, nombreCliente: credito.cliente?.nombre || 'Desconocido' }
     });
-
-    // Sincronizar con el embebido en cliente
     await syncCreditoToCliente(id);
-
-    const creditoActualizado = await Credito.findById(credito._id)
-      .populate('cliente');
-
-    res.status(200).json({
-      success: true,
-      data: creditoActualizado
-    });
+    const creditoActualizado = await Credito.findById(credito._id).populate('cliente');
+    res.status(200).json({ success: true, data: creditoActualizado });
   } catch (error) {
     next(error);
   }
 };
 
-/**
- * @desc    Agregar un abono a un crédito
- * @route   POST /api/creditos/:id/abonos
- * @access  Private
- */
+// ==============================================================
+// AGREGAR ABONO
+// ==============================================================
 export const agregarAbono = async (req, res, next) => {
   try {
     const { valor, descripcion, fecha, tipo, nroCuota, multaId } = req.body;
+
+    if (isDemoMode) {
+      let credito = store.findById('creditos', req.params.id);
+      if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+
+      if (multaId || tipo === 'multa') {
+        if (!multaId) return res.status(400).json({ success: false, error: 'multaId es requerido para abonos de multa' });
+        credito.abonosMulta = credito.abonosMulta || [];
+        credito.abonosMulta.push({
+          id: Date.now().toString(), valor: parseFloat(valor),
+          descripcion: descripcion || 'Abono a multa', fecha: fecha ? normalizarFecha(fecha) : new Date(),
+          multaId
+        });
+      } else {
+        credito.abonos = credito.abonos || [];
+        credito.abonos.push({
+          id: Date.now().toString(), valor: parseFloat(valor),
+          descripcion: descripcion || 'Abono al crédito', fecha: fecha || new Date(),
+          nroCuota: nroCuota ? parseInt(nroCuota, 10) : null
+        });
+      }
+
+      credito = recalcularCreditoCompleto(credito);
+      store.update('creditos', req.params.id, credito);
+      syncCreditoToClienteDemo(req.params.id);
+      const cl = store.findById('clientes', credito.cliente);
+      return res.status(201).json({ success: true, data: { ...credito, cliente: cl || credito.cliente } });
+    }
+
+    // ---- PRODUCCIÓN ----
     let credito = await Credito.findById(req.params.id);
+    if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
 
-    if (!credito) {
-      return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
-    }
-
-    // Si es un abono de multa, agregarlo a abonosMulta (completamente independiente)
     if (multaId || tipo === 'multa') {
-      if (!multaId) {
-        return res.status(400).json({ success: false, error: 'multaId es requerido para abonos de multa' });
-      }
-
-      // Normalizar la fecha del abono de multa para evitar problemas de zona horaria
-      let fechaAbonoMulta = fecha || new Date();
-      if (fecha) {
-        if (typeof fecha === 'string') {
-          // Si viene como string YYYY-MM-DD, crear Date en UTC mediodía para evitar problemas de zona horaria
-          const partes = fecha.split('T')[0].split('-');
-          if (partes.length === 3) {
-            // Usar UTC para que la fecha se mantenga correcta independientemente de la zona horaria del servidor
-            fechaAbonoMulta = new Date(Date.UTC(parseInt(partes[0]), parseInt(partes[1]) - 1, parseInt(partes[2]), 12, 0, 0, 0));
-          } else {
-            fechaAbonoMulta = new Date(fecha);
-          }
-        } else if (fecha instanceof Date) {
-          fechaAbonoMulta = fecha;
-        } else {
-          fechaAbonoMulta = new Date(fecha);
-        }
-      }
-
-      const nuevoAbonoMulta = {
-        id: Date.now().toString(),
-        valor: parseFloat(valor),
-        descripcion: descripcion || 'Abono a multa',
-        fecha: fechaAbonoMulta,
-        multaId: multaId
-      };
-
+      if (!multaId) return res.status(400).json({ success: false, error: 'multaId es requerido para abonos de multa' });
+      const fechaAbonoMulta = fecha ? normalizarFecha(fecha) : new Date();
       credito.abonosMulta = credito.abonosMulta || [];
-      credito.abonosMulta.push(nuevoAbonoMulta);
+      credito.abonosMulta.push({
+        id: Date.now().toString(), valor: parseFloat(valor),
+        descripcion: descripcion || 'Abono a multa', fecha: fechaAbonoMulta, multaId
+      });
     } else {
-      // Abono de cuota (normal)
-      const nuevoAbono = {
-        id: Date.now().toString(),
-        valor: parseFloat(valor),
-        descripcion: descripcion || 'Abono al crédito',
-        fecha: fecha || new Date(),
+      credito.abonos.push({
+        id: Date.now().toString(), valor: parseFloat(valor),
+        descripcion: descripcion || 'Abono al crédito', fecha: fecha || new Date(),
         nroCuota: nroCuota ? parseInt(nroCuota, 10) : null
-      };
-
-      credito.abonos.push(nuevoAbono);
+      });
     }
 
-    // Lógica Centralizada de Recálculo
     credito = recalcularCreditoCompleto(credito);
-
     await credito.save();
-
-    // Sincronizar con el embebido en cliente
     await syncCreditoToCliente(req.params.id);
-
     const creditoActualizado = await Credito.findById(credito._id).populate('cliente');
-
     res.status(201).json({ success: true, data: creditoActualizado });
   } catch (error) {
     next(error);
   }
 };
 
-/**
- * @desc    Eliminar un abono
- * @route   DELETE /api/creditos/:id/abonos/:abonoId
- * @access  Private
- */
+// ==============================================================
+// ELIMINAR ABONO
+// ==============================================================
 export const eliminarAbono = async (req, res, next) => {
   try {
-    let credito = await Credito.findById(req.params.id).populate('cliente');
-    if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
-
     const abonoId = req.params.abonoId;
 
-    // Buscar en abonos de cuotas
-    const abonoEncontrado = credito.abonos.find(a => a.id === abonoId);
-    let abonoEliminado = null;
+    if (isDemoMode) {
+      let credito = store.findById('creditos', req.params.id);
+      if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
 
-    if (abonoEncontrado) {
-      abonoEliminado = { ...abonoEncontrado };
+      let abonoEliminado = (credito.abonos || []).find(a => a.id === abonoId);
+      if (abonoEliminado) {
+        credito.abonos = credito.abonos.filter(a => a.id !== abonoId);
+      } else {
+        abonoEliminado = (credito.abonosMulta || []).find(a => a.id === abonoId);
+        if (abonoEliminado) credito.abonosMulta = credito.abonosMulta.filter(a => a.id !== abonoId);
+      }
+      if (abonoEliminado) {
+        registrarBorradoDemo({
+          tipo: 'abono', idOriginal: abonoId, detalles: abonoEliminado,
+          usuario: req.user._id, usuarioNombre: req.user.nombre,
+          metadata: { creditoId: req.params.id, valorAbono: abonoEliminado.valor }
+        });
+      }
+      credito = recalcularCreditoCompleto(credito);
+      store.update('creditos', req.params.id, credito);
+      syncCreditoToClienteDemo(req.params.id);
+      const cl = store.findById('clientes', credito.cliente);
+      return res.status(200).json({ success: true, data: { ...credito, cliente: cl || credito.cliente } });
+    }
+
+    // ---- PRODUCCIÓN ----
+    let credito = await Credito.findById(req.params.id).populate('cliente');
+    if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+    let abonoEliminado = credito.abonos.find(a => a.id === abonoId);
+    if (abonoEliminado) {
       credito.abonos = credito.abonos.filter(a => a.id !== abonoId);
     } else {
-      // Buscar en abonos de multas
-      const abonoMultaEncontrado = (credito.abonosMulta || []).find(a => a.id === abonoId);
-      if (abonoMultaEncontrado) {
-        abonoEliminado = { ...abonoMultaEncontrado };
-        credito.abonosMulta = (credito.abonosMulta || []).filter(a => a.id !== abonoId);
-      }
+      const am = (credito.abonosMulta || []).find(a => a.id === abonoId);
+      if (am) { abonoEliminado = am; credito.abonosMulta = credito.abonosMulta.filter(a => a.id !== abonoId); }
     }
-
     if (abonoEliminado) {
-      // Registrar en historial
       await registrarBorrado({
-        tipo: 'abono',
-        idOriginal: abonoId,
-        detalles: abonoEliminado,
-        usuario: req.user._id,
-        usuarioNombre: req.user.nombre,
-        metadata: {
-          creditoId: req.params.id,
-          valorAbono: abonoEliminado.valor,
-          nombreCliente: credito.cliente?.nombre || 'Desconocido'
-        }
+        tipo: 'abono', idOriginal: abonoId, detalles: abonoEliminado,
+        usuario: req.user._id, usuarioNombre: req.user.nombre,
+        metadata: { creditoId: req.params.id, valorAbono: abonoEliminado.valor, nombreCliente: credito.cliente?.nombre || 'Desconocido' }
       });
     }
-
-    // Recalcular todo el estado del crédito tras eliminar abono
     credito = recalcularCreditoCompleto(credito);
-
     await credito.save();
     await syncCreditoToCliente(req.params.id);
-
     const creditoActualizado = await Credito.findById(credito._id).populate('cliente');
     res.status(200).json({ success: true, data: creditoActualizado });
   } catch (error) {
@@ -795,98 +665,76 @@ export const eliminarAbono = async (req, res, next) => {
   }
 };
 
-/**
- * @desc    Editar un abono
- * @route   PUT /api/creditos/:id/abonos/:abonoId
- * @access  Private
- */
+// ==============================================================
+// EDITAR ABONO
+// ==============================================================
 export const editarAbono = async (req, res, next) => {
   try {
     const { valor, descripcion, fecha, tipo, nroCuota } = req.body;
-    let credito = await Credito.findById(req.params.id);
-    if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
-
     const abonoId = req.params.abonoId;
 
-    // Buscar primero en abonos de cuotas
-    let abonoIndex = credito.abonos.findIndex(a => a.id === abonoId);
-    let esAbonoMulta = false;
+    if (isDemoMode) {
+      let credito = store.findById('creditos', req.params.id);
+      if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
 
-    // Si no se encuentra, buscar en abonos de multas
-    if (abonoIndex === -1) {
-      abonoIndex = (credito.abonosMulta || []).findIndex(a => a.id === abonoId);
-      esAbonoMulta = abonoIndex !== -1;
-    }
+      let idx = (credito.abonos || []).findIndex(a => a.id === abonoId);
+      let esMulta = false;
+      if (idx === -1) { idx = (credito.abonosMulta || []).findIndex(a => a.id === abonoId); esMulta = idx !== -1; }
+      if (idx === -1) return res.status(404).json({ success: false, error: 'Abono no encontrado' });
 
-    if (abonoIndex === -1) {
-      return res.status(404).json({ success: false, error: 'Abono no encontrado' });
-    }
-
-    // Normalizar fecha si se proporciona
-    let fechaNormalizada = null;
-    if (fecha) {
-      if (typeof fecha === 'string') {
-        const partes = fecha.split('T')[0].split('-');
-        if (partes.length === 3) {
-          fechaNormalizada = new Date(Date.UTC(parseInt(partes[0]), parseInt(partes[1]) - 1, parseInt(partes[2]), 12, 0, 0, 0));
-        } else {
-          fechaNormalizada = new Date(fecha);
-        }
-      } else if (fecha instanceof Date) {
-        fechaNormalizada = fecha;
+      const fechaNorm = fecha ? normalizarFecha(fecha) : null;
+      if (esMulta) {
+        const abono = credito.abonosMulta[idx];
+        credito.abonosMulta[idx] = {
+          ...abono, valor: valor !== undefined ? parseFloat(valor) : abono.valor,
+          descripcion: descripcion !== undefined ? descripcion : abono.descripcion,
+          fecha: fechaNorm || abono.fecha
+        };
       } else {
-        fechaNormalizada = new Date(fecha);
+        const abono = credito.abonos[idx];
+        credito.abonos[idx] = {
+          ...abono, valor: valor ? parseFloat(valor) : abono.valor,
+          descripcion: descripcion !== undefined ? descripcion : abono.descripcion,
+          fecha: fechaNorm || abono.fecha, tipo: tipo || abono.tipo,
+          nroCuota: nroCuota ? parseInt(nroCuota, 10) : (nroCuota === null ? null : abono.nroCuota)
+        };
       }
+
+      credito = recalcularCreditoCompleto(credito);
+      store.update('creditos', req.params.id, credito);
+      syncCreditoToClienteDemo(req.params.id);
+      const cl = store.findById('clientes', credito.cliente);
+      return res.status(200).json({ success: true, data: { ...credito, cliente: cl || credito.cliente } });
     }
 
-    if (esAbonoMulta) {
-      // Actualizar abono de multa
-      const abonoOriginal = credito.abonosMulta[abonoIndex];
+    // ---- PRODUCCIÓN ----
+    let credito = await Credito.findById(req.params.id);
+    if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+    let idx = credito.abonos.findIndex(a => a.id === abonoId);
+    let esMulta = false;
+    if (idx === -1) { idx = (credito.abonosMulta || []).findIndex(a => a.id === abonoId); esMulta = idx !== -1; }
+    if (idx === -1) return res.status(404).json({ success: false, error: 'Abono no encontrado' });
 
-      // Crear una copia del objeto para asegurar que Mongoose detecte el cambio
-      const abonoActualizado = {
-        id: abonoOriginal.id || abonoId,
-        valor: valor !== undefined ? parseFloat(valor) : abonoOriginal.valor,
-        descripcion: descripcion !== undefined ? descripcion : abonoOriginal.descripcion,
-        fecha: fechaNormalizada || abonoOriginal.fecha,
-        multaId: abonoOriginal.multaId // Asegurar que multaId se mantenga
-      };
-
-      // Usar set para actualizar el array completo y forzar que Mongoose detecte el cambio
-      const nuevosAbonosMulta = credito.abonosMulta.map((abono, idx) =>
-        idx === abonoIndex ? abonoActualizado : abono
-      );
-      credito.set('abonosMulta', nuevosAbonosMulta);
-
-      console.log(`[editarAbono] Abono de multa actualizado:`, {
-        abonoId,
-        fechaAnterior: abonoOriginal.fecha,
-        fechaNueva: abonoActualizado.fecha,
-        valorAnterior: abonoOriginal.valor,
-        valorNuevo: abonoActualizado.valor,
-        fechaNormalizadaRecibida: fecha,
-        fechaNormalizadaProcesada: fechaNormalizada
-      });
+    const fechaNorm = fecha ? normalizarFecha(fecha) : null;
+    if (esMulta) {
+      const abono = credito.abonosMulta[idx];
+      const updated = { ...abono, valor: valor !== undefined ? parseFloat(valor) : abono.valor, descripcion: descripcion !== undefined ? descripcion : abono.descripcion, fecha: fechaNorm || abono.fecha };
+      const nuevos = credito.abonosMulta.map((a, i) => i === idx ? updated : a);
+      credito.set('abonosMulta', nuevos);
     } else {
-      // Actualizar abono de cuota
-      const abonoOriginal = credito.abonos[abonoIndex];
-      credito.abonos[abonoIndex] = {
-        ...abonoOriginal,
-        id: abonoOriginal.id || abonoId, // Asegurar que el ID siempre esté presente
-        valor: valor ? parseFloat(valor) : abonoOriginal.valor,
-        descripcion: descripcion !== undefined ? descripcion : abonoOriginal.descripcion,
-        fecha: fechaNormalizada || abonoOriginal.fecha,
-        tipo: tipo || abonoOriginal.tipo,
-        nroCuota: nroCuota ? parseInt(nroCuota, 10) : (nroCuota === null ? null : abonoOriginal.nroCuota)
+      const abono = credito.abonos[idx];
+      credito.abonos[idx] = {
+        ...abono, id: abono.id || abonoId,
+        valor: valor ? parseFloat(valor) : abono.valor,
+        descripcion: descripcion !== undefined ? descripcion : abono.descripcion,
+        fecha: fechaNorm || abono.fecha, tipo: tipo || abono.tipo,
+        nroCuota: nroCuota ? parseInt(nroCuota, 10) : (nroCuota === null ? null : abono.nroCuota)
       };
     }
 
-    // Recalcular todo el estado del crédito tras editar abono
     credito = recalcularCreditoCompleto(credito);
-
     await credito.save();
     await syncCreditoToCliente(req.params.id);
-
     const creditoActualizado = await Credito.findById(credito._id).populate('cliente');
     res.status(200).json({ success: true, data: creditoActualizado });
   } catch (error) {
@@ -894,33 +742,40 @@ export const editarAbono = async (req, res, next) => {
   }
 };
 
-/**
- * @desc    Agregar una multa
- * @route   POST /api/creditos/:id/multas
- * @access  Private
- */
+// ==============================================================
+// AGREGAR MULTA
+// ==============================================================
 export const agregarMulta = async (req, res, next) => {
   try {
     const { nroCuota, valor, motivo } = req.body;
-    // nroCuota es opcional ahora, solo informativo o para referencia visual
+
+    if (isDemoMode) {
+      let credito = store.findById('creditos', req.params.id);
+      if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+      credito.multas = credito.multas || [];
+      credito.multas.push({
+        id: Date.now().toString(), valor: parseFloat(valor),
+        motivo: motivo + (nroCuota ? ` (Ref. Cuota #${nroCuota})` : ''),
+        fecha: new Date(), pagada: false
+      });
+      credito = recalcularCreditoCompleto(credito);
+      store.update('creditos', req.params.id, credito);
+      syncCreditoToClienteDemo(req.params.id);
+      const cl = store.findById('clientes', credito.cliente);
+      return res.status(201).json({ success: true, data: { ...credito, cliente: cl || credito.cliente } });
+    }
+
     let credito = await Credito.findById(req.params.id);
     if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
-
     credito.multas = credito.multas || [];
     credito.multas.push({
-      id: Date.now().toString(),
-      valor: parseFloat(valor),
+      id: Date.now().toString(), valor: parseFloat(valor),
       motivo: motivo + (nroCuota ? ` (Ref. Cuota #${nroCuota})` : ''),
-      fecha: new Date(),
-      pagada: false
+      fecha: new Date(), pagada: false
     });
-
-    // Recalcular saldos y totalAPagar (incluye multas pendientes)
     credito = recalcularCreditoCompleto(credito);
-
     await credito.save();
     await syncCreditoToCliente(req.params.id);
-
     const creditoActualizado = await Credito.findById(credito._id).populate('cliente');
     res.status(201).json({ success: true, data: creditoActualizado });
   } catch (error) {
@@ -928,41 +783,47 @@ export const agregarMulta = async (req, res, next) => {
   }
 };
 
-/**
- * @desc    Editar una multa
- * @route   PUT /api/creditos/:id/multas/:multaId
- * @access  Private
- */
+// ==============================================================
+// EDITAR MULTA
+// ==============================================================
 export const editarMulta = async (req, res, next) => {
   try {
     const { multaId } = req.params;
     const { valor, fecha, motivo } = req.body;
+
+    if (isDemoMode) {
+      let credito = store.findById('creditos', req.params.id);
+      if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+      const multa = (credito.multas || []).find(m => m.id === multaId);
+      if (!multa) return res.status(404).json({ success: false, error: 'Multa no encontrada' });
+      if (valor !== undefined) multa.valor = parseFloat(valor);
+      if (fecha !== undefined) multa.fecha = new Date(fecha);
+      if (motivo !== undefined) {
+        const match = multa.motivo.match(/\(Ref\. Cuota #(\d+)\)/);
+        const ref = match ? match[1] : null;
+        multa.motivo = motivo + (ref ? ` (Ref. Cuota #${ref})` : '');
+      }
+      credito = recalcularCreditoCompleto(credito);
+      store.update('creditos', req.params.id, credito);
+      syncCreditoToClienteDemo(req.params.id);
+      const cl = store.findById('clientes', credito.cliente);
+      return res.status(200).json({ success: true, data: { ...credito, cliente: cl || credito.cliente } });
+    }
+
     let credito = await Credito.findById(req.params.id);
     if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
-
     const multa = credito.multas.find(m => m.id === multaId);
     if (!multa) return res.status(404).json({ success: false, error: 'Multa no encontrada' });
-
-    // Actualizar valores si se proporcionan
-    if (valor !== undefined) {
-      multa.valor = parseFloat(valor);
-    }
-    if (fecha !== undefined) {
-      multa.fecha = new Date(fecha);
-    }
+    if (valor !== undefined) multa.valor = parseFloat(valor);
+    if (fecha !== undefined) multa.fecha = new Date(fecha);
     if (motivo !== undefined) {
-      // Preservar la referencia a cuota si existe
       const match = multa.motivo.match(/\(Ref\. Cuota #(\d+)\)/);
-      const nroCuotaRef = match ? match[1] : null;
-      multa.motivo = motivo + (nroCuotaRef ? ` (Ref. Cuota #${nroCuotaRef})` : '');
+      const ref = match ? match[1] : null;
+      multa.motivo = motivo + (ref ? ` (Ref. Cuota #${ref})` : '');
     }
-
-    // Recalcular saldos y totalAPagar
     credito = recalcularCreditoCompleto(credito);
-
     await credito.save();
     await syncCreditoToCliente(req.params.id);
-
     const creditoActualizado = await Credito.findById(credito._id).populate('cliente');
     res.status(200).json({ success: true, data: creditoActualizado });
   } catch (error) {
@@ -970,47 +831,48 @@ export const editarMulta = async (req, res, next) => {
   }
 };
 
-/**
- * @desc    Eliminar una multa
- * @route   DELETE /api/creditos/:id/multas/:multaId
- * @access  Private
- */
+// ==============================================================
+// ELIMINAR MULTA
+// ==============================================================
 export const eliminarMulta = async (req, res, next) => {
   try {
     const { multaId } = req.params;
-    let credito = await Credito.findById(req.params.id).populate('cliente');
-    if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
 
-    const multaEliminada = (credito.multas || []).find(m => m.id === multaId);
-
-    // Eliminar la multa
-    credito.multas = (credito.multas || []).filter(m => m.id !== multaId);
-
-    // Eliminar también todos los abonosMulta asociados a esta multa
-    credito.abonosMulta = (credito.abonosMulta || []).filter(a => a.multaId !== multaId);
-
-    if (multaEliminada) {
-      // Registrar en historial
-      await registrarBorrado({
-        tipo: 'multa',
-        idOriginal: multaId,
-        detalles: multaEliminada,
-        usuario: req.user._id,
-        usuarioNombre: req.user.nombre,
-        metadata: {
-          creditoId: req.params.id,
-          valorMulta: multaEliminada.valor,
-          nombreCliente: credito.cliente?.nombre || 'Desconocido'
-        }
-      });
+    if (isDemoMode) {
+      let credito = store.findById('creditos', req.params.id);
+      if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+      const multaEliminada = (credito.multas || []).find(m => m.id === multaId);
+      credito.multas = (credito.multas || []).filter(m => m.id !== multaId);
+      credito.abonosMulta = (credito.abonosMulta || []).filter(a => a.multaId !== multaId);
+      if (multaEliminada) {
+        registrarBorradoDemo({
+          tipo: 'multa', idOriginal: multaId, detalles: multaEliminada,
+          usuario: req.user._id, usuarioNombre: req.user.nombre,
+          metadata: { creditoId: req.params.id, valorMulta: multaEliminada.valor }
+        });
+      }
+      credito = recalcularCreditoCompleto(credito);
+      store.update('creditos', req.params.id, credito);
+      syncCreditoToClienteDemo(req.params.id);
+      const cl = store.findById('clientes', credito.cliente);
+      return res.status(200).json({ success: true, data: { ...credito, cliente: cl || credito.cliente } });
     }
 
-    // Recalcular saldos y totalAPagar (sin la multa eliminada y sus abonos)
+    let credito = await Credito.findById(req.params.id).populate('cliente');
+    if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+    const multaEliminada = (credito.multas || []).find(m => m.id === multaId);
+    credito.multas = (credito.multas || []).filter(m => m.id !== multaId);
+    credito.abonosMulta = (credito.abonosMulta || []).filter(a => a.multaId !== multaId);
+    if (multaEliminada) {
+      await registrarBorrado({
+        tipo: 'multa', idOriginal: multaId, detalles: multaEliminada,
+        usuario: req.user._id, usuarioNombre: req.user.nombre,
+        metadata: { creditoId: req.params.id, valorMulta: multaEliminada.valor, nombreCliente: credito.cliente?.nombre || 'Desconocido' }
+      });
+    }
     credito = recalcularCreditoCompleto(credito);
-
     await credito.save();
     await syncCreditoToCliente(req.params.id);
-
     const creditoActualizado = await Credito.findById(credito._id).populate('cliente');
     res.status(200).json({ success: true, data: creditoActualizado });
   } catch (error) {
@@ -1018,34 +880,32 @@ export const eliminarMulta = async (req, res, next) => {
   }
 };
 
-/**
- * @desc    Agregar un descuento
- * @route   POST /api/creditos/:id/descuentos
- * @access  Private
- */
+// ==============================================================
+// AGREGAR DESCUENTO
+// ==============================================================
 export const agregarDescuento = async (req, res, next) => {
   try {
     const { valor, tipo, descripcion } = req.body;
+
+    if (isDemoMode) {
+      const credito = store.findById('creditos', req.params.id);
+      if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
+      credito.descuentos = credito.descuentos || [];
+      credito.descuentos.push({ id: Date.now().toString(), valor, tipo, descripcion, fecha: new Date() });
+      store.update('creditos', req.params.id, { descuentos: credito.descuentos });
+      syncCreditoToClienteDemo(req.params.id);
+      const cl = store.findById('clientes', credito.cliente);
+      return res.status(201).json({ success: true, data: { ...store.findById('creditos', req.params.id), cliente: cl || credito.cliente } });
+    }
+
     const credito = await Credito.findById(req.params.id);
     if (!credito) return res.status(404).json({ success: false, error: 'Crédito no encontrado' });
-
-    credito.descuentos.push({
-      id: Date.now().toString(),
-      valor,
-      tipo,
-      descripcion,
-      fecha: new Date()
-    });
-
+    credito.descuentos.push({ id: Date.now().toString(), valor, tipo, descripcion, fecha: new Date() });
     await credito.save();
-
-    // Sincronizar con el embebido en cliente
     await syncCreditoToCliente(req.params.id);
-
     const creditoActualizado = await Credito.findById(credito._id).populate('cliente');
     res.status(201).json({ success: true, data: creditoActualizado });
   } catch (error) {
     next(error);
   }
 };
-

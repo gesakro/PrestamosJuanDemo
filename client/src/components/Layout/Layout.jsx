@@ -4,6 +4,8 @@ import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api';
 import { toast } from 'react-toastify';
 import { AlertTriangle } from 'lucide-react';
+import DemoBanner from './DemoBanner';
+
 
 const Layout = ({ children }) => {
   const { user } = useAuth();
@@ -51,6 +53,7 @@ const Layout = ({ children }) => {
 
   return (
     <div className="min-h-screen bg-gray-50">
+      <DemoBanner />
       <Navbar />
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {children}

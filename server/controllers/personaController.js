@@ -1,392 +1,177 @@
-import Persona from '../models/Persona.js';
+import { isDemoMode } from '../config/demoMode.js';
+import store from '../repositories/inMemoryStore.js';
+import bcrypt from 'bcryptjs';
 
-/**
- * @desc    Obtener todas las personas
- * @route   GET /api/personas
- * @access  Private (solo CEO y Administrador)
- */
+let Persona = null;
+if (!isDemoMode) {
+  const module = await import('../models/Persona.js');
+  Persona = module.default;
+}
+
+const DEMO_PERMISSIONS = {
+  domiciliario: {
+    verClientes: true, verCreditosActivos: true, verCreditosFinalizados: true,
+    registrarPagos: true, agregarNotas: true, agregarMultas: true,
+    crearClientes: false, editarClientes: false, eliminarClientes: false,
+    crearCreditos: false, editarCreditos: false, eliminarCreditos: false,
+    verEstadisticas: false, verConfiguracion: false, exportarDatos: false,
+    importarDatos: false, limpiarDatos: false, verCaja: false, gestionarCaja: false
+  },
+  supervisor: {
+    verClientes: true, verCreditosActivos: true, verCreditosFinalizados: true,
+    registrarPagos: false, agregarNotas: true, agregarMultas: false,
+    crearClientes: false, editarClientes: true, eliminarClientes: false,
+    crearCreditos: false, editarCreditos: false, eliminarCreditos: false,
+    verEstadisticas: false, verConfiguracion: false, exportarDatos: false,
+    importarDatos: false, limpiarDatos: false, verCaja: false, gestionarCaja: false
+  },
+  administrador: {
+    verClientes: true, verCreditosActivos: true, verCreditosFinalizados: true,
+    registrarPagos: true, agregarNotas: true, agregarMultas: true,
+    crearClientes: true, editarClientes: true, eliminarClientes: true,
+    crearCreditos: true, editarCreditos: true, eliminarCreditos: false,
+    verEstadisticas: true, verConfiguracion: false, exportarDatos: true,
+    importarDatos: false, limpiarDatos: false, verCaja: true, gestionarCaja: true
+  },
+  ceo: {
+    verClientes: true, verCreditosActivos: true, verCreditosFinalizados: true,
+    registrarPagos: true, agregarNotas: true, agregarMultas: true,
+    crearClientes: true, editarClientes: true, eliminarClientes: true,
+    crearCreditos: true, editarCreditos: true, eliminarCreditos: true,
+    verEstadisticas: true, verConfiguracion: true, exportarDatos: true,
+    importarDatos: true, limpiarDatos: true, verCaja: true, gestionarCaja: true
+  }
+};
+
 export const getPersonas = async (req, res, next) => {
   try {
-    const { role, activo, page = 1, limit = 50 } = req.query;
-
+    const { role, activo, search, page = 1, limit = 50 } = req.query;
+    if (isDemoMode) {
+      let results = store.findAll('personas');
+      if (role) results = results.filter(p => p.role === role);
+      if (activo !== undefined) results = results.filter(p => p.activo === (activo === 'true'));
+      if (search) {
+        const lower = search.toLowerCase();
+        results = results.filter(p =>
+          (p.nombre && p.nombre.toLowerCase().includes(lower)) ||
+          (p.username && p.username.toLowerCase().includes(lower)) ||
+          (p.email && p.email.toLowerCase().includes(lower))
+        );
+      }
+      results.sort((a, b) => new Date(b.fechaCreacion) - new Date(a.fechaCreacion));
+      const data = results.map(({ password, ...p }) => ({
+        ...p, permissions: DEMO_PERMISSIONS[p.role] || {}
+      }));
+      const total = data.length;
+      const skip = (parseInt(page) - 1) * parseInt(limit);
+      return res.status(200).json({ success: true, count: data.length, total, data: data.slice(skip, skip + parseInt(limit)) });
+    }
     const query = {};
-
-    if (role) {
-      query.role = role;
-    }
-
-    if (activo !== undefined) {
-      query.activo = activo === 'true';
-    }
-
+    if (role) query.role = role;
+    if (activo !== undefined) query.activo = activo === 'true';
+    if (search) query.$or = [{ nombre: { $regex: search, $options: 'i' } }, { username: { $regex: search, $options: 'i' } }, { email: { $regex: search, $options: 'i' } }];
     const skip = (parseInt(page) - 1) * parseInt(limit);
-
-    const personas = await Persona.find(query)
-      .select('-password')
-      .sort({ fechaCreacion: -1 })
-      .skip(skip)
-      .limit(parseInt(limit));
-
+    const personas = await Persona.find(query).select('-password').sort({ fechaCreacion: -1 }).skip(skip).limit(parseInt(limit));
     const total = await Persona.countDocuments(query);
-
-    res.status(200).json({
-      success: true,
-      count: personas.length,
-      total,
-      data: personas
-    });
-  } catch (error) {
-    next(error);
-  }
+    res.status(200).json({ success: true, count: personas.length, total, data: personas });
+  } catch (error) { next(error); }
 };
 
-/**
- * @desc    Obtener una persona por ID
- * @route   GET /api/personas/:id
- * @access  Private
- */
 export const getPersona = async (req, res, next) => {
   try {
-    const persona = await Persona.findById(req.params.id).select('-password');
-
-    if (!persona) {
-      return res.status(404).json({
-        success: false,
-        error: 'Persona no encontrada'
-      });
+    if (isDemoMode) {
+      const p = store.findById('personas', req.params.id);
+      if (!p) return res.status(404).json({ success: false, error: 'Persona no encontrada' });
+      const { password, ...data } = p;
+      return res.status(200).json({ success: true, data: { ...data, permissions: DEMO_PERMISSIONS[p.role] || {} } });
     }
-
-    const personaData = {
-      ...persona.toObject(),
-      ...persona.toObject(),
-      permissions: persona.getPermissions(),
-      ocultarProrroga: persona.ocultarProrroga
-    };
-
-    res.status(200).json({
-      success: true,
-      data: personaData
-    });
-  } catch (error) {
-    next(error);
-  }
+    const persona = await Persona.findById(req.params.id).select('-password');
+    if (!persona) return res.status(404).json({ success: false, error: 'Persona no encontrada' });
+    res.status(200).json({ success: true, data: persona });
+  } catch (error) { next(error); }
 };
 
-/**
- * @desc    Crear una nueva persona
- * @route   POST /api/personas
- * @access  Private (solo CEO y Administrador)
- */
 export const createPersona = async (req, res, next) => {
   try {
     const { username, password, nombre, email, role, ciudad } = req.body;
+    if (!username || !password || !nombre || !role) {
+      return res.status(400).json({ success: false, error: 'Campos requeridos: username, password, nombre, role' });
+    }
 
-    // Validaciones
-    if (!username || !password || !nombre || !email || !role) {
-      return res.status(400).json({
-        success: false,
-        error: 'Por favor proporciona todos los campos requeridos'
+    if (isDemoMode) {
+      const existing = store.findOne('personas', { username: username.toLowerCase() });
+      if (existing) return res.status(400).json({ success: false, error: 'El username ya existe' });
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash(password, salt);
+      const persona = store.create('personas', {
+        username: username.toLowerCase(), password: hashedPassword, nombre, email, role, ciudad,
+        activo: true, fechaCreacion: new Date(), ocultarProrroga: role !== 'ceo'
       });
+      const { password: _, ...data } = persona;
+      return res.status(201).json({ success: true, data: { ...data, permissions: DEMO_PERMISSIONS[role] || {} } });
     }
 
-    // Validar ciudad si el rol es domiciliario o supervisor
-    if ((role === 'domiciliario' || role === 'supervisor') && !ciudad) {
-      return res.status(400).json({
-        success: false,
-        error: 'La ciudad es requerida para este rol'
-      });
-    }
-
-    if ((role === 'domiciliario' || role === 'supervisor') && !['Tuluá', 'Guadalajara de Buga'].includes(ciudad)) {
-      return res.status(400).json({
-        success: false,
-        error: 'La ciudad debe ser "Tuluá" o "Guadalajara de Buga"'
-      });
-    }
-
-    // Verificar si el username ya existe
-    const personaExistente = await Persona.findOne({ username: username.toLowerCase() });
-    if (personaExistente) {
-      return res.status(400).json({
-        success: false,
-        error: 'El nombre de usuario ya existe'
-      });
-    }
-
-    // Verificar si el email ya existe
-    const emailExistente = await Persona.findOne({ email: email.toLowerCase() });
-    if (emailExistente) {
-      return res.status(400).json({
-        success: false,
-        error: 'El correo electrónico ya está registrado'
-      });
-    }
-
-    // Validar rol
-    if (!['domiciliario', 'supervisor', 'administrador', 'ceo'].includes(role)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Rol inválido'
-      });
-    }
-
-    // Crear persona
-    const personaDataToCreate = {
-      username: username.toLowerCase(),
-      password,
-      nombre,
-      email: email.toLowerCase(),
-      role
-    };
-
-    // Solo agregar ciudad si el rol es domiciliario o supervisor
-    if (role === 'domiciliario' || role === 'supervisor') {
-      personaDataToCreate.ciudad = ciudad;
-    }
-
-    const persona = await Persona.create(personaDataToCreate);
-
-    const personaData = {
-      id: persona._id,
-      username: persona.username,
-      nombre: persona.nombre,
-      email: persona.email,
-      role: persona.role,
-      activo: persona.activo,
-      fechaCreacion: persona.fechaCreacion,
-      permissions: persona.getPermissions()
-    };
-
-    // Incluir ciudad solo si es domiciliario o supervisor
-    if (persona.role === 'domiciliario' || persona.role === 'supervisor') {
-      if (persona.ciudad) personaData.ciudad = persona.ciudad;
-      if (persona.role === 'domiciliario') {
-        personaData.ocultarProrroga = persona.ocultarProrroga;
-      }
-    }
-
-    res.status(201).json({
-      success: true,
-      data: personaData
-    });
-  } catch (error) {
-    next(error);
-  }
+    const existing = await Persona.findOne({ username: username.toLowerCase() });
+    if (existing) return res.status(400).json({ success: false, error: 'El username ya existe' });
+    const persona = await Persona.create({ username: username.toLowerCase(), password, nombre, email, role, ciudad, activo: true });
+    const personaRes = await Persona.findById(persona._id).select('-password');
+    res.status(201).json({ success: true, data: personaRes });
+  } catch (error) { next(error); }
 };
 
-/**
- * @desc    Actualizar una persona
- * @route   PUT /api/personas/:id
- * @access  Private
- */
 export const updatePersona = async (req, res, next) => {
   try {
-    const { nombre, email, role, activo, password, ciudad, ocultarProrroga } = req.body;
-    const personaId = req.params.id;
+    const updates = { ...req.body };
 
-    // Verificar que la persona existe
-    const persona = await Persona.findById(personaId);
-    if (!persona) {
-      return res.status(404).json({
-        success: false,
-        error: 'Persona no encontrada'
-      });
-    }
-
-    // Solo CEO puede cambiar roles de otros usuarios
-    if (role && req.user.role !== 'ceo' && req.user._id.toString() !== personaId) {
-      return res.status(403).json({
-        success: false,
-        error: 'No tienes permisos para cambiar el rol'
-      });
-    }
-
-    // Solo CEO puede desactivar otros usuarios
-    if (activo !== undefined && req.user.role !== 'ceo' && req.user._id.toString() !== personaId) {
-      return res.status(403).json({
-        success: false,
-        error: 'No tienes permisos para cambiar el estado del usuario'
-      });
-    }
-
-    // Solo CEO puede cambiar la contraseña de otros usuarios sin saber la anterior
-    if (password) {
-      if (req.user.role !== 'ceo' && req.user._id.toString() !== personaId) {
-        return res.status(403).json({
-          success: false,
-          error: 'No tienes permisos para cambiar la contraseña de este usuario'
-        });
+    if (isDemoMode) {
+      const persona = store.findById('personas', req.params.id);
+      if (!persona) return res.status(404).json({ success: false, error: 'Persona no encontrada' });
+      if (updates.password) {
+        const salt = await bcrypt.genSalt(10);
+        updates.password = await bcrypt.hash(updates.password, salt);
       }
-      if (password.length < 6) {
-        return res.status(400).json({
-          success: false,
-          error: 'La contraseña debe tener al menos 6 caracteres'
-        });
-      }
-      persona.password = password;
+      if (updates.username) updates.username = updates.username.toLowerCase();
+      const updated = store.update('personas', req.params.id, updates);
+      const { password, ...data } = updated;
+      return res.status(200).json({ success: true, data: { ...data, permissions: DEMO_PERMISSIONS[updated.role] || {} } });
     }
 
-    // Verificar si el email ya existe (si se está actualizando)
-    if (email && email.toLowerCase() !== persona.email) {
-      const emailExistente = await Persona.findOne({ email: email.toLowerCase() });
-      if (emailExistente) {
-        return res.status(400).json({
-          success: false,
-          error: 'El correo electrónico ya está registrado'
-        });
-      }
-    }
-
-    // Verificar si el username ya existe (si se está actualizando)
-    const { username } = req.body;
-    if (username && username.toLowerCase() !== persona.username) {
-      // Solo el CEO puede cambiar el nombre de usuario
-      if (req.user.role !== 'ceo') {
-        return res.status(403).json({
-          success: false,
-          error: 'No tienes permisos para cambiar el nombre de usuario'
-        });
-      }
-
-      const usernameExistente = await Persona.findOne({ username: username.toLowerCase() });
-      if (usernameExistente) {
-        return res.status(400).json({
-          success: false,
-          error: 'El nombre de usuario ya está en uso'
-        });
-      }
-      persona.username = username.toLowerCase();
-    }
-
-    // Validar ciudad si el rol es o será domiciliario o supervisor
-    const nuevoRole = role || persona.role;
-    if (nuevoRole === 'domiciliario' || nuevoRole === 'supervisor') {
-      const nuevaCiudad = ciudad !== undefined ? ciudad : persona.ciudad;
-      if (!nuevaCiudad) {
-        return res.status(400).json({
-          success: false,
-          error: 'La ciudad es requerida para este rol'
-        });
-      }
-      if (!['Tuluá', 'Guadalajara de Buga'].includes(nuevaCiudad)) {
-        return res.status(400).json({
-          success: false,
-          error: 'La ciudad debe ser "Tuluá" o "Guadalajara de Buga"'
-        });
-      }
-    }
-
-    // Actualizar campos
-    if (nombre) persona.nombre = nombre;
-    if (email) persona.email = email.toLowerCase();
-    if (role && req.user.role === 'ceo') {
-      persona.role = role;
-      // Si cambia a un rol que no usa ciudad, eliminar ciudad
-      if (role !== 'domiciliario' && role !== 'supervisor') {
-        persona.ciudad = undefined;
-      }
-    }
-    if (activo !== undefined && req.user.role === 'ceo') persona.activo = activo;
-
-    // Actualizar ciudad solo si el rol es domiciliario o supervisor
-    if ((nuevoRole === 'domiciliario' || nuevoRole === 'supervisor') && ciudad !== undefined) {
-      persona.ciudad = ciudad;
-    }
-
-    // Actualizar ocultarProrroga solo si el role es domiciliario
-    if (nuevoRole === 'domiciliario' && ocultarProrroga !== undefined) {
-      persona.ocultarProrroga = ocultarProrroga;
-    }
-
+    if (updates.username) updates.username = updates.username.toLowerCase();
+    const persona = await Persona.findById(req.params.id);
+    if (!persona) return res.status(404).json({ success: false, error: 'Persona no encontrada' });
+    Object.assign(persona, updates);
     await persona.save();
-
-    const personaData = {
-      id: persona._id,
-      username: persona.username,
-      nombre: persona.nombre,
-      email: persona.email,
-      role: persona.role,
-      activo: persona.activo,
-      permissions: persona.getPermissions()
-    };
-
-    // Incluir ciudad solo si es domiciliario o supervisor
-    if (persona.role === 'domiciliario' || persona.role === 'supervisor') {
-      if (persona.ciudad) personaData.ciudad = persona.ciudad;
-      if (persona.role === 'domiciliario') {
-        personaData.ocultarProrroga = persona.ocultarProrroga;
-      }
-    }
-
-    res.status(200).json({
-      success: true,
-      data: personaData
-    });
-  } catch (error) {
-    next(error);
-  }
+    const personaRes = await Persona.findById(persona._id).select('-password');
+    res.status(200).json({ success: true, data: personaRes });
+  } catch (error) { next(error); }
 };
 
-/**
- * @desc    Eliminar una persona
- * @route   DELETE /api/personas/:id
- * @access  Private (solo CEO)
- */
 export const deletePersona = async (req, res, next) => {
   try {
+    if (isDemoMode) {
+      const persona = store.findById('personas', req.params.id);
+      if (!persona) return res.status(404).json({ success: false, error: 'Persona no encontrada' });
+      if (persona.role === 'ceo') return res.status(400).json({ success: false, error: 'No se puede eliminar al CEO' });
+      store.delete('personas', req.params.id);
+      return res.status(200).json({ success: true, message: 'Persona eliminada correctamente' });
+    }
     const persona = await Persona.findById(req.params.id);
-
-    if (!persona) {
-      return res.status(404).json({
-        success: false,
-        error: 'Persona no encontrada'
-      });
-    }
-
-    // No permitir eliminar a sí mismo
-    if (req.user._id.toString() === req.params.id) {
-      return res.status(400).json({
-        success: false,
-        error: 'No puedes eliminar tu propia cuenta'
-      });
-    }
-
+    if (!persona) return res.status(404).json({ success: false, error: 'Persona no encontrada' });
+    if (persona.role === 'ceo') return res.status(400).json({ success: false, error: 'No se puede eliminar al CEO' });
     await Persona.findByIdAndDelete(req.params.id);
-
-    res.status(200).json({
-      success: true,
-      message: 'Persona eliminada correctamente'
-    });
-  } catch (error) {
-    next(error);
-  }
+    res.status(200).json({ success: true, message: 'Persona eliminada correctamente' });
+  } catch (error) { next(error); }
 };
 
-/**
- * @desc    Obtener permisos de una persona
- * @route   GET /api/personas/:id/permissions
- * @access  Private
- */
 export const getPermissions = async (req, res, next) => {
   try {
-    const persona = await Persona.findById(req.params.id);
-
-    if (!persona) {
-      return res.status(404).json({
-        success: false,
-        error: 'Persona no encontrada'
-      });
+    if (isDemoMode) {
+      const persona = store.findById('personas', req.params.id);
+      if (!persona) return res.status(404).json({ success: false, error: 'Persona no encontrada' });
+      return res.status(200).json({ success: true, data: { role: persona.role, permissions: DEMO_PERMISSIONS[persona.role] || {} } });
     }
-
-    res.status(200).json({
-      success: true,
-      data: {
-        role: persona.role,
-        permissions: persona.getPermissions()
-      }
-    });
-  } catch (error) {
-    next(error);
-  }
+    const persona = await Persona.findById(req.params.id);
+    if (!persona) return res.status(404).json({ success: false, error: 'Persona no encontrada' });
+    res.status(200).json({ success: true, data: { role: persona.role, permissions: persona.getPermissions() } });
+  } catch (error) { next(error); }
 };
-

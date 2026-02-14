@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 
 import { useAuth } from '../../context/AuthContext';
+import { BRANDING } from '../../config/branding';
 
 const Navbar = () => {
   const location = useLocation();
@@ -169,7 +170,7 @@ const Navbar = () => {
               <TrendingUp className="h-6 w-6 text-white" />
             </div>
             <span className="text-xl font-bold text-slate-800 tracking-tight hidden sm:block">
-              Servi Carnes
+              {BRANDING.appName}
             </span>
           </Link>
 
@@ -373,4 +374,3 @@ const Navbar = () => {
 };
 
 export default Navbar;
-

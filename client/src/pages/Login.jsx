@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { User, Lock, AlertCircle } from 'lucide-react';
+import { User, Lock, AlertCircle, Building2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import CowIcon from '../Icon/Cow.png';
+import { BRANDING } from '../config/branding';
 
 const Login = () => {
   const navigate = useNavigate();
@@ -23,6 +23,10 @@ const Login = () => {
     setError('');
   };
 
+  const handleQuickLogin = (username, password) => {
+    setFormData({ username, password });
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
@@ -30,7 +34,7 @@ const Login = () => {
 
     try {
       const result = await login(formData.username, formData.password);
-      
+
       if (result.success) {
         navigate('/');
       } else {
@@ -44,19 +48,26 @@ const Login = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-sky-500 via-blue-500 to-purple-600 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-8">
+    <div className="min-h-screen bg-gradient-to-br from-slate-800 via-slate-900 to-slate-900 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-8 relative overflow-hidden">
+        {/* Banner Demo */}
+        {BRANDING.demoMode && (
+          <div className="absolute top-0 left-0 w-full bg-amber-100 text-amber-800 text-xs font-bold text-center py-1">
+            VERSIÓN DEMO
+          </div>
+        )}
+
         {/* Logo y título */}
-        <div className="flex flex-col items-center mb-8">
-          <div className="w-24 h-24 mb-4 flex items-center justify-center">
-            <img src={CowIcon} alt="Servi Carnes" className="w-full h-full object-contain" />
+        <div className="flex flex-col items-center mb-8 mt-4">
+          <div className="w-20 h-20 mb-4 flex items-center justify-center bg-slate-100 rounded-2xl">
+            <Building2 className="w-10 h-10 text-slate-700" />
           </div>
           <div className="text-center">
-            <h1 className="text-3xl font-extrabold text-gray-900 mb-1 tracking-tight">
-              Servi Carnes
+            <h1 className="text-3xl font-extrabold text-slate-900 mb-1 tracking-tight">
+              {BRANDING.appName}
             </h1>
-            <p className="text-gray-600">
-              Sistema de Gestión de Créditos
+            <p className="text-slate-500">
+              {BRANDING.subtitle}
             </p>
           </div>
         </div>
@@ -83,7 +94,7 @@ const Login = () => {
                 name="username"
                 value={formData.username}
                 onChange={handleChange}
-                className="input-field pl-10"
+                className="w-full pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-slate-500 focus:border-slate-500 transition-colors"
                 placeholder="Ingresa tu usuario"
                 required
                 autoFocus
@@ -103,7 +114,7 @@ const Login = () => {
                 name="password"
                 value={formData.password}
                 onChange={handleChange}
-                className="input-field pl-10"
+                className="w-full pl-10 pr-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-slate-500 focus:border-slate-500 transition-colors"
                 placeholder="Ingresa tu contraseña"
                 required
               />
@@ -114,11 +125,10 @@ const Login = () => {
           <button
             type="submit"
             disabled={loading}
-            className={`w-full py-3 px-4 rounded-lg font-semibold text-white transition-all ${
-              loading
+            className={`w-full py-3 px-4 rounded-lg font-semibold text-white transition-all ${loading
                 ? 'bg-gray-400 cursor-not-allowed'
-                : 'bg-gradient-to-r from-sky-600 to-blue-600 hover:from-sky-700 hover:to-blue-700 shadow-lg hover:shadow-xl'
-            }`}
+                : 'bg-slate-800 hover:bg-slate-700 shadow-lg hover:shadow-xl'
+              }`}
           >
             {loading ? (
               <span className="flex items-center justify-center">
@@ -133,6 +143,45 @@ const Login = () => {
             )}
           </button>
         </form>
+
+        {/* Demo Quick Login Buttons */}
+        {BRANDING.demoMode && (
+          <div className="mt-8 pt-6 border-t border-gray-100">
+            <p className="text-center text-xs text-gray-400 uppercase font-bold tracking-wider mb-4">Acceso Rápido (Demo)</p>
+            <div className="grid grid-cols-3 gap-2">
+              <button
+                type="button"
+                onClick={() => handleQuickLogin('admin', 'demo123')}
+                className="flex flex-col items-center justify-center p-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 transition-colors text-xs font-medium"
+              >
+                <div className="w-8 h-8 rounded-full bg-indigo-200 flex items-center justify-center mb-1">
+                  <User className="w-4 h-4" />
+                </div>
+                Admin (CEO)
+              </button>
+              <button
+                type="button"
+                onClick={() => handleQuickLogin('asesor', 'demo123')}
+                className="flex flex-col items-center justify-center p-2 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 transition-colors text-xs font-medium"
+              >
+                <div className="w-8 h-8 rounded-full bg-emerald-200 flex items-center justify-center mb-1">
+                  <User className="w-4 h-4" />
+                </div>
+                Asesor
+              </button>
+              <button
+                type="button"
+                onClick={() => handleQuickLogin('cobrador', 'demo123')}
+                className="flex flex-col items-center justify-center p-2 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-700 transition-colors text-xs font-medium"
+              >
+                <div className="w-8 h-8 rounded-full bg-amber-200 flex items-center justify-center mb-1">
+                  <User className="w-4 h-4" />
+                </div>
+                Cobrador
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
